@@ -17,7 +17,7 @@ Welcome! This Node.js application integrates Asterisk 22 with the OpenAI Realtim
 | Category      | Details                                      |
 |---------------|---------------------------------------------|
 | OS            | Debian 13                            |
-| Software      | FreePX7
+| Software      | Free PBX 17
 | Network       | - Ports: 8088 (ARI), 12000+ (RTP)<br>- Access to `wss://api.openai.com/v1/realtime` |
 | Credentials   | - OpenAI API key (`OPENAI_API_KEY`) - prepare the key before the installation 
 
