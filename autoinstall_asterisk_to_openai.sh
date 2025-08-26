@@ -1,299 +1,203 @@
 #!/bin/bash
-# Asterisk ↔ OpenAI Realtime installer (Debian & FreePBX)
-# Safe for FreePBX (writes only to *_custom.conf). Idempotent.
-# Creates/keeps ARI user [openai_rt] with plain password.
-# Includes end-of-run verification and FreePBX GUI manual.
+# Asterisk ↔ OpenAI Realtime installer (FreePBX-only)
+# FreePBX-safe: writes only *_custom.conf (never touches ari.conf/http.conf).
+# Creates/keeps ARI user [openai_rt] in ari_additional_custom.conf (plain).
+# Updates only selected keys in app's config.conf (from repo), without recreating it.
 
 set -Eeuo pipefail
 
-# ========== Logging & traps ==========
+# ========= Logging & traps =========
 TS="$(date +%Y%m%d-%H%M%S)"
 LOGFILE="/root/asterisk-openai-install-${TS}.log"
-# Mirror all stdout/stderr to a logfile
 exec > >(tee -a "$LOGFILE") 2>&1
-
 if [[ "${DEBUG:-0}" != "0" ]]; then set -x; fi
-
 err() {
   local ec=$?
   echo -e "\n\033[0;31mERROR:\033[0m command failed with exit code ${ec}"
   echo -e "  Line: ${BASH_LINENO[0]}  Cmd: ${BASH_COMMAND}\n"
-  echo "See log: $LOGFILE"
+  echo "Log: $LOGFILE"
   exit $ec
 }
 trap err ERR
 
-# ========== Colors & symbols ==========
+# ========= Colors =========
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 OK="${GREEN}✔${NC}"; FAIL="${RED}✖${NC}"; WARN="${YELLOW}!${NC}"
 
-# ========== Globals ==========
-ENV="unknown"
-HTTP_ADDR="127.0.0.1"; HTTP_PORT="8088"; ARI_URL="http://127.0.0.1:8088"
-ARI_USERNAME="openai_rt"; ARI_PASSWORD=""
-PUBLIC_IP=""; LOCAL_CIDR=""
-DEBIAN_SIP_PASS=""
+# ========= Globals =========
+HTTP_ADDR="127.0.0.1"
+HTTP_PORT="8088"
+ARI_URL="http://127.0.0.1:8088"
+
+ARI_USERNAME="openai_rt"
+ARI_PASSWORD=""             # will be read or generated
+
 PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
 
-# ========== Helpers ==========
+APP_DIR="/opt/asterisk_to_openai_rt_community"
+SERVICE_FILE="/etc/systemd/system/asterisk-openai.service"
+RUN_USER="asterisk"         # FreePBX default
+
+# ========= Helpers =========
 log() { echo -e "$@"; }
 inc_pass(){ PASS_COUNT=$((PASS_COUNT+1)); }
 inc_fail(){ FAIL_COUNT=$((FAIL_COUNT+1)); }
 inc_warn(){ WARN_COUNT=$((WARN_COUNT+1)); }
 
-check_root() {
-  if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    echo -e "${RED}Run as root (use sudo).${NC}"; exit 1
+check_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { echo -e "${RED}Run as root (sudo).${NC}"; exit 1; }; }
+
+require_freepbx() {
+  if ! command -v fwconsole >/dev/null 2>&1; then
+    echo -e "${RED}This installer is FreePBX-only. 'fwconsole' not found. Aborting.${NC}"
+    exit 1
   fi
 }
 
-# Generate a 16-char alphanumeric string (pipefail-safe)
+ensure_pkg() { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; }
+
 rand16() {
   local r
   r="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9')"
   printf '%s' "${r:0:16}"
 }
 
-is_freepbx() { command -v fwconsole >/dev/null 2>&1; }
-ensure_pkg() { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"; }
-
-get_public_ip() {
-  for s in "https://icanhazip.com" "https://ifconfig.me"; do
-    ip=$(curl -s --max-time 5 "$s" 2>/dev/null || true)
-    if [ -n "$ip" ]; then echo "${ip%%[$'\r\n']*}"; return; fi
-  done
-  echo "192.168.1.100"
-}
-
-get_local_cidr() {
-  # Prefer RFC1918 range if present; else first global IPv4 or a sane default
-  local cidr rfc1918
-  rfc1918=$(ip -4 addr show | awk '/inet /{print $2}' | grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)' | head -n1 || true)
-  if [ -n "$rfc1918" ]; then
-    echo "$rfc1918"
-    return
-  fi
-  cidr=$(ip -4 addr show scope global | awk '/inet /{print $2; exit}')
-  [ -n "${cidr:-}" ] && echo "$cidr" || echo "192.168.1.0/24"
-}
-
-append_unique() {
-  local file="$1" pattern="$2" block="$3"
-  touch "$file"
-  if ! grep -qE "$pattern" "$file" 2>/dev/null; then printf "\n%s\n" "$block" >> "$file"; fi
-}
-
 safe_backup() { [ -f "$1" ] && cp -a "$1" "$1.bak.$(date +%s)" || true; }
 
-ensure_http_conf() {
-  local f="/etc/asterisk/http.conf"
-  touch "$f"; safe_backup "$f"
-  grep -q '^\[general\]' "$f" || sed -i '1i [general]' "$f"
-  if grep -q '^[[:space:]]*enabled[[:space:]]*=' "$f"; then
-    sed -i 's/^\s*enabled\s*=.*/enabled=yes/' "$f"
-  else
-    echo "enabled=yes" >> "$f"
-  fi
-  grep -q '^[[:space:]]*bindaddr[[:space:]]*=' "$f" || echo "bindaddr=127.0.0.1" >> "$f"
-  grep -q '^[[:space:]]*bindport[[:space:]]*=' "$f" || echo "bindport=8088" >> "$f"
-}
-
-read_http_bind() {
-  local f="/etc/asterisk/http.conf" addr port
-  addr=$(awk -F= '/^\s*bindaddr\s*=/ {gsub(/[ \t]/,"",$2); v=$2} END{print v}' "$f")
-  port=$(awk -F= '/^\s*bindport\s*=/ {gsub(/[ \t]/,"",$2); v=$2} END{print v}' "$f")
-  [ -z "$addr" ] && addr="127.0.0.1"
-  [ -z "$port" ] && port="8088"
-  echo "${addr}:${port}"
-}
-
-read_ari_user_from_ari_conf() {
-  # echo "password:format" for given user if exists; else empty
-  local user="$1" f="/etc/asterisk/ari.conf"
-  [ -f "$f" ] || return 0
-  awk -v WANT="$user" '
-    /^\[[^]]+\]/ { sect=$0; gsub(/^\[|\]$/,"",sect); fmt="plain"; pass=""; inuser=(sect==WANT) }
-    inuser && /^[ \t]*password_format[ \t]*=/ { sub(/^[^=]*=/,""); gsub(/[ \t]/,""); fmt=$0 }
-    inuser && /^[ \t]*password[ \t]*=/ { sub(/^[^=]*=/,""); gsub(/^[ \t]+|[ \t]+$/,""); pass=$0 }
-    END { if(pass!="") print pass ":" fmt }
-  ' "$f"
-}
-
-ensure_ari_plain_user() {
-  # Ensure [openai_rt] with plain password exists (idempotent).
-  local existing pass fmt
-  existing=$(read_ari_user_from_ari_conf "openai_rt" || true)
-  if [ -n "$existing" ]; then
-    pass="${existing%%:*}"; fmt="${existing##*:}"
-    if [ "${fmt:-plain}" = "plain" ]; then
-      ARI_PASSWORD="$pass"
-      return
-    fi
-    # Replace crypt-format section with a plain one
-    ARI_PASSWORD="$(rand16)"
-    safe_backup "/etc/asterisk/ari.conf"
-    awk -v RS= -v ORS= '
-      {
-        gsub(/\r/,"")
-        n=split($0, a, /\n\[/); out=""
-        for(i=1;i<=n;i++){
-          s=a[i]
-          if (i>1) { s="[" s }
-          if (match(s, /^\[openai_rt\][\s\S]*/)) { s="" }
-          out=out s
-        }
-        print out
-      }' /etc/asterisk/ari.conf > /etc/asterisk/ari.conf.tmp || true
-    mv -f /etc/asterisk/ari.conf.tmp /etc/asterisk/ari.conf
-    cat >>/etc/asterisk/ari.conf <<EOF
-
-[openai_rt]
-type=user
-password=${ARI_PASSWORD}
-read_only=no
-password_format=plain
-EOF
-  else
-    # Create fresh section
-    ARI_PASSWORD="$(rand16)"
-    touch /etc/asterisk/ari.conf
-    safe_backup "/etc/asterisk/ari.conf"
-    grep -q '^\[general\]' /etc/asterisk/ari.conf || echo "[general]" >> /etc/asterisk/ari.conf
-    grep -q '^\s*enabled\s*=' /etc/asterisk/ari.conf || echo "enabled=yes" >> /etc/asterisk/ari.conf
-    grep -q '^\s*pretty\s*=' /etc/asterisk/ari.conf || echo "pretty=yes" >> /etc/asterisk/ari.conf
-    cat >>/etc/asterisk/ari.conf <<EOF
-
-[openai_rt]
-type=user
-password=${ARI_PASSWORD}
-read_only=no
-password_format=plain
-EOF
-  fi
-}
-
-set_kv_in_file() {
-  local file="$1" key="$2" val="$3"
+# Replace or append KEY=VALUE in .env-like file without touching other lines
+update_env_kv() {
+  local file="$1" key="$2" val="$3" tmp
   touch "$file"
-  if grep -q "^${key}=" "$file"; then
-    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  tmp="$(mktemp "${file}.XXXX")"
+  awk -v k="$key" -v v="$val" '
+    BEGIN{done=0}
+    $0 ~ ("^"k"=") && !done { print k"="v; done=1; next }
+    { print }
+    END{ if(!done) print k"="v }
+  ' "$file" > "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# Read ARI password from existing files (custom first)
+get_existing_ari_pass() {
+  local line f
+  for f in /etc/asterisk/ari_additional_custom.conf /etc/asterisk/ari_additional.conf; do
+    [ -f "$f" ] || continue
+    # Wyciągnij linię "password = ..." z bloku [openai_rt]
+    line="$(sed -n '/^\[openai_rt\]/,/^\[/{/^\[/b; /password[[:space:]]*=/p}' "$f" | head -n1)"
+    if [ -n "$line" ]; then
+      printf '%s\n' "${line#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+      return 0
+    fi
+  done
+  return 1
+}
+get_ari_password_format() {
+  local line f
+  for f in /etc/asterisk/ari_additional_custom.conf /etc/asterisk/ari_additional.conf; do
+    [ -f "$f" ] || continue
+    line="$(sed -n '/^\[openai_rt\]/,/^\[/{/^\[/b; /password_format[[:space:]]*=/p}' "$f" | head -n1)"
+    if [ -n "$line" ]; then
+      printf '%s\n' "${line#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+      return 0
+    fi
+  done
+  return 1
+}
+# ========= FreePBX-safe Asterisk configs =========
+ensure_http_conf_freepbx() {
+  local f="/etc/asterisk/http_custom.conf"
+  safe_backup "$f"
+  cat > "$f" <<EOF
+[general]
+enabled=yes
+bindaddr=127.0.0.1
+bindport=8088
+enable_status=yes
+EOF
+}
+
+ensure_ari_general_custom() {
+  local f="/etc/asterisk/ari_general_custom.conf"
+  touch "$f"
+  if ! grep -q '^\[general\]' "$f" 2>/dev/null; then
+    cat >> "$f" <<EOF
+[general]
+enabled = yes
+pretty  = yes
+EOF
   else
-    echo "${key}=${val}" >> "$file"
+    grep -q '^[[:space:]]*enabled[[:space:]]*=' "$f" || echo "enabled = yes" >> "$f"
+    grep -q '^[[:space:]]*pretty[[:space:]]*='  "$f" || echo "pretty  = yes" >> "$f"
   fi
 }
 
-has_pjsip_object_type() {
-  # has_pjsip_object_type FILE SECTION TYPE -> 0 if exists
-  local f="$1" sect="$2" typ="$3"
-  awk -v S="$sect" -v T="$typ" '
-    BEGIN{in=0;found=0}
-    /^\[[^]]+\]/ {name=substr($0,2,length($0)-2); in=(name==S); next}
-    in && $0 ~ /^type[ \t]*=[ \t]*([^#;]+)/ {
-      gsub(/^type[ \t]*=[ \t]*/,"",$0); gsub(/[ \t].*$/,"",$0)
-      if ($0==T) {found=1; exit 0}
-    }
-    END{exit found?0:1}
-  ' "$f"
-}
-
-get_pjsip_auth_password() {
-  local f="/etc/asterisk/pjsip_custom.conf"
-  [ -f "$f" ] || return 0
-  awk '
-    /^\[1005\]$/ {in=1; next}
-    /^\[/ {in=0}
-    in && /^type[ \t]*=/ { if ($0 ~ /auth/) ta=1 }
-    in && /^password[ \t]*=/ { sub(/^[^=]*=/,""); gsub(/^[ \t]+|[ \t]+$/,""); if (ta) {print $0; exit} }
-  ' "$f"
-}
-
-ensure_debian_pjsip_custom() {
-  local f="/etc/asterisk/pjsip_custom.conf"
+ensure_ari_user_custom() {
+  local f="/etc/asterisk/ari_additional_custom.conf"
   touch "$f"; safe_backup "$f"
 
-  append_unique "$f" '^\[transport-udp\][[:space:]]*$' "[transport-udp]
-type=transport
-protocol=udp
-bind=0.0.0.0
-external_media_address=${PUBLIC_IP}
-external_signaling_address=${PUBLIC_IP}
-local_net=${LOCAL_CIDR}
-"
+  if [ -z "${ARI_PASSWORD}" ]; then
+    if ARI_PASSWORD="$(get_existing_ari_pass)"; then :; else ARI_PASSWORD="$(rand16)"; fi
+  fi
 
-  if has_pjsip_object_type "$f" "1005" "endpoint"; then :; else
-    cat >>"$f" <<'EOF'
-[1005]
-type=endpoint
-context=default
-disallow=all
-allow=ulaw
-auth=1005
-aors=1005
-direct_media=no
-rtp_symmetric=yes
-force_rport=yes
-rewrite_contact=yes
+  # Remove any existing [openai_rt] block in custom file, then write fresh plain one
+  awk -v RS= -v ORS= '
+    {
+      gsub(/\r/, "")
+      n=split($0, a, /\n\[/); out=""
+      for(i=1;i<=n;i++){
+        s=a[i]; if (i>1) s="[" s
+        if (match(s, /^\[openai_rt\][\s\S]*/)) s=""
+        out=out s
+      } print out
+    }' "$f" > "${f}.tmp" || true
+  mv -f "${f}.tmp" "$f"
+
+  cat >>"$f" <<EOF
+
+[openai_rt]
+type=user
+password=${ARI_PASSWORD}
+read_only=no
+password_format=plain
 EOF
-  fi
-
-  if has_pjsip_object_type "$f" "1005" "auth"; then :; else
-    DEBIAN_SIP_PASS="$(rand16)"
-    cat >>"$f" <<EOF
-[1005]
-type=auth
-auth_type=userpass
-password=${DEBIAN_SIP_PASS}
-username=1005
-EOF
-  fi
-
-  if has_pjsip_object_type "$f" "1005" "aor"; then :; else
-    cat >>"$f" <<'EOF'
-[1005]
-type=aor
-max_contacts=2
-EOF
-  fi
-
-  if [ -z "${DEBIAN_SIP_PASS}" ]; then
-    DEBIAN_SIP_PASS="$(get_pjsip_auth_password || true)"
-  fi
 }
 
-ensure_dialplan() {
-  if is_freepbx; then
-    local f="/etc/asterisk/extensions_custom.conf"
-    touch "$f"
-    append_unique "$f" 'OPENAI_RT_AUTOCONFIG' "; BEGIN OPENAI_RT_AUTOCONFIG
+ensure_dialplan_freepbx() {
+  local f="/etc/asterisk/extensions_custom.conf"
+  touch "$f"
+  if ! grep -q 'OPENAI_RT_AUTOCONFIG' "$f" 2>/dev/null; then
+    cat >>"$f" <<'EOF'
+
+; BEGIN OPENAI_RT_AUTOCONFIG
 [from-internal-custom]
 exten => 9999,1,NoOp(OpenAI Realtime)
  same => n,Answer()
  same => n,Stasis(asterisk_to_openai_rt)
  same => n,Hangup()
-; END OPENAI_RT_AUTOCONFIG"
-  else
-    local f="/etc/asterisk/extensions.conf"
-    safe_backup "$f"
-    if ! grep -q 'OPENAI_RT_AUTOCONFIG' "$f" 2>/dev/null; then
-      cat >>"$f" <<'EOF'
-
-; BEGIN OPENAI_RT_AUTOCONFIG
-[default]
-exten => 9999,1,Answer()
- same => n,Stasis(asterisk_to_openai_rt)
- same => n,Hangup()
 ; END OPENAI_RT_AUTOCONFIG
 EOF
-    fi
   fi
 }
 
-# ========== Verification ==========
+read_http_bind_from_status() {
+  local status line hostport
+  status="$(asterisk -rx 'http show status' 2>/dev/null || true)"
+  # Only the HTTP line, not HTTPS; first match wins
+  line="$(printf '%s\n' "$status" | grep -m1 '^Server Enabled and Bound to ')"
+  if [ -n "$line" ]; then
+    hostport="$(printf '%s\n' "$line" | awk '{print $6}')"
+    printf '%s' "$hostport"
+  else
+    printf '%s' "127.0.0.1:8088"
+  fi
+}
+
+# ========= Verification =========
 verify_http_enabled() {
-  set +e
   local out rc
+  set +e
   out=$(asterisk -rx "http show status" 2>/dev/null); rc=$?
-  if [ $rc -eq 0 ] && echo "$out" | grep -qiE 'Server Enabled|Enabled[[:space:]]+and Bound|Enabled:.*Yes'; then
+  if [ $rc -eq 0 ] && echo "$out" | grep -qiE 'Server Enabled and Bound|Enabled:.*Yes'; then
     echo -e "${OK} HTTP server enabled"; inc_pass
   else
     echo -e "${FAIL} HTTP server NOT enabled (check: asterisk -rx \"http show status\")"; inc_fail
@@ -303,10 +207,10 @@ verify_http_enabled() {
 
 verify_ari_user_plain() {
   set +e
-  local existing fmt
-  existing=$(read_ari_user_from_ari_conf "openai_rt")
-  fmt="${existing##*:}"
-  if [ -n "$existing" ] && [ "${fmt:-plain}" = "plain" ]; then
+  local pass fmt
+  pass="$(get_existing_ari_pass || true)"
+  fmt="$(get_ari_password_format || true)"
+  if [ -n "$pass" ] && { [ -z "$fmt" ] || [ "$fmt" = "plain" ]; }; then
     echo -e "${OK} ARI user 'openai_rt' present with plain password"; inc_pass
   else
     echo -e "${FAIL} ARI user 'openai_rt' missing or not plain"; inc_fail
@@ -315,27 +219,13 @@ verify_ari_user_plain() {
 }
 
 verify_dialplan_loaded() {
-  set +e
   local out rc
-  if [ "$ENV" = "freepbx" ]; then
-    out=$(asterisk -rx "dialplan show from-internal-custom" 2>/dev/null); rc=$?
-  else
-    out=$(asterisk -rx "dialplan show default" 2>/dev/null); rc=$?
-  fi
+  set +e
+  out=$(asterisk -rx "dialplan show from-internal-custom" 2>/dev/null); rc=$?
   if [ $rc -eq 0 ] && echo "$out" | grep -q "Stasis(asterisk_to_openai_rt)"; then
     echo -e "${OK} Dialplan 9999 loaded (Stasis)"; inc_pass
   else
     echo -e "${FAIL} Dialplan 9999 NOT found in loaded plan"; inc_fail
-  fi
-  set -e
-}
-
-verify_service_active() {
-  set +e
-  if systemctl is-enabled --quiet asterisk-openai.service && systemctl is-active --quiet asterisk-openai.service; then
-    echo -e "${OK} systemd service 'asterisk-openai.service' active & enabled"; inc_pass
-  else
-    echo -e "${WARN} service not active yet (maybe missing OPENAI_API_KEY). Check: systemctl status asterisk-openai.service"; inc_warn
   fi
   set -e
 }
@@ -347,17 +237,42 @@ verify_ari_http_auth() {
   if [ "$code" = "200" ]; then
     echo -e "${OK} ARI HTTP auth works (${ARI_URL}/ari/applications → 200)"; inc_pass
   else
-    echo -e "${WARN} ARI HTTP auth HTTP ${code} (verify user/pass & http.conf)"; inc_warn
+    echo -e "${WARN} ARI HTTP auth HTTP ${code} (verify user/pass & http settings)"; inc_warn
   fi
+  set -e
+}
+
+verify_service_active_or_report() {
+  set +e
+  if systemctl is-enabled --quiet asterisk-openai.service && systemctl is-active --quiet asterisk-openai.service; then
+    echo -e "${OK} systemd service 'asterisk-openai.service' active & enabled"; inc_pass
+    set -e; return
+  fi
+
+  # Validate required keys to avoid restart loop
+  local cfg="${APP_DIR}/config.conf"
+  local miss=()
+  for k in OPENAI_API_KEY ARI_URL ARI_USERNAME ARI_PASSWORD; do
+    if ! grep -q "^${k}=" "$cfg" 2>/dev/null || [ -z "$(grep "^${k}=" "$cfg" | sed 's/^[^=]*=//')" ]; then
+      miss+=("$k")
+    fi
+  done
+  if [ ${#miss[@]} -gt 0 ]; then
+    echo -e "${FAIL} Service not running. Missing keys in config.conf: ${miss[*]}"
+  else
+    echo -e "${FAIL} Service not running. See recent logs:"
+  fi
+
+  journalctl -u asterisk-openai.service -n 50 --no-pager || true
+  systemctl stop asterisk-openai.service || true
+  systemctl reset-failed asterisk-openai.service || true
+  inc_fail
   set -e
 }
 
 print_verification_summary() {
   echo -e "\n${BOLD}Post-install verification:${NC}"
   echo -e "- Passed: ${GREEN}${PASS_COUNT}${NC}  Failed: ${RED}${FAIL_COUNT}${NC}  Warnings: ${YELLOW}${WARN_COUNT}${NC}"
-  if [ $FAIL_COUNT -gt 0 ]; then
-    echo -e "${RED}Some critical checks failed. Fix issues above and re-run the script.${NC}"
-  fi
 }
 
 print_freepbx_manual() {
@@ -383,9 +298,6 @@ Option B) Create a Custom Destination and a Misc Application
      - Destination: Custom Destinations → OpenAI Realtime (9999)
      - Submit, then Apply Config
 
-  Now dialing *9999 (or 9999) from an internal phone will hit:
-     Stasis(asterisk_to_openai_rt)
-
 Option C) Inbound Route → Destination
   - To point an external DID to the app:
     Connectivity → Inbound Routes → (pick your DID)
@@ -393,84 +305,85 @@ Option C) Inbound Route → Destination
     - Submit, then Apply Config
 
 Notes:
-  - We never write to extensions_additional.conf or pjsip.conf. FreePBX generates them.
-  - ARI user 'openai_rt' is stored in /etc/asterisk/ari.conf with a plain password.
-  - After you add OPENAI_API_KEY to the app config, restart the service.
-
+  - We use only *_custom.conf files (http_custom.conf, ari_general_custom.conf, ari_additional_custom.conf).
+  - We do NOT edit ari.conf or http.conf (they are FreePBX-generated).
+  - The app reads config from /opt/asterisk_to_openai_rt_community/config.conf.
 --------------------------------------------------------------------------------
 HOWTO
 }
 
-# ========== Main ==========
+# ========= Main =========
 check_root
-log "${CYAN}${BOLD}Starting installation...${NC}"
+require_freepbx
+
+log "${CYAN}${BOLD}Starting installation (FreePBX-only)...${NC}"
 log "Full log: ${LOGFILE}"
 
 log "${CYAN}Installing prerequisites (curl git openssl iproute2 nodejs npm)...${NC}"
 ensure_pkg curl git openssl iproute2 nodejs npm
 
-# Detect environment
-if is_freepbx; then ENV="freepbx"; else ENV="debian"; fi
-log "Environment detected: ${ENV}"
+# HTTP + ARI configs (custom-only)
+log "${CYAN}Ensuring HTTP server (http_custom.conf)...${NC}"
+ensure_http_conf_freepbx
 
-# Networking
-PUBLIC_IP=$(get_public_ip)
-LOCAL_CIDR=$(get_local_cidr)
-log "Detected PUBLIC_IP=${PUBLIC_IP}  LOCAL_CIDR=${LOCAL_CIDR}"
+log "${CYAN}Ensuring ARI general (ari_general_custom.conf)...${NC}"
+ensure_ari_general_custom
 
-# HTTP for ARI
-log "${CYAN}Ensuring Asterisk HTTP server is enabled...${NC}"
-ensure_http_conf
-BIND="$(read_http_bind)"; HTTP_ADDR="${BIND%%:*}"; HTTP_PORT="${BIND##*:}"
-ARI_URL="http://${HTTP_ADDR}:${HTTP_PORT}"
-log "ARI_URL set to ${ARI_URL}"
-
-# ARI user (plain)
-log "${CYAN}Ensuring ARI user 'openai_rt' (plain password)...${NC}"
-ensure_ari_plain_user
-log "Using ARI credentials: ${ARI_USERNAME} / ${ARI_PASSWORD}"
+log "${CYAN}Ensuring ARI user '${ARI_USERNAME}' in ari_additional_custom.conf...${NC}"
+ensure_ari_user_custom
 
 # Dialplan
-log "${CYAN}Ensuring dialplan (extension 9999)...${NC}"
-ensure_dialplan
+log "${CYAN}Ensuring dialplan (extensions_custom.conf -> 9999)...${NC}"
+ensure_dialplan_freepbx
 
-# SIP (Debian only)
-if [ "$ENV" = "debian" ]; then
-  log "${CYAN}Ensuring SIP (pjsip_custom.conf) on Debian...${NC}"
-  ensure_debian_pjsip_custom
-  [ -n "${DEBIAN_SIP_PASS}" ] && log "Endpoint 1005 password: ${DEBIAN_SIP_PASS}"
-else
-  log "${YELLOW}Skipping SIP endpoint writes on FreePBX (manage via GUI).${NC}"
-fi
+# Reload Asterisk via FreePBX
+log "${CYAN}Reloading Asterisk via fwconsole...${NC}"
+fwconsole reload
 
-# Reload Asterisk
-log "${CYAN}Reloading Asterisk configuration...${NC}"
-if [ "$ENV" = "freepbx" ]; then fwconsole reload; else systemctl restart asterisk; fi
+# Determine runtime HTTP bind
+BIND="$(read_http_bind_from_status)"; HTTP_ADDR="${BIND%%:*}"; HTTP_PORT="${BIND##*:}"
+ARI_URL="http://${HTTP_ADDR}:${HTTP_PORT}"
+log "ARI_URL detected: ${ARI_URL}"
 
-# Clone/update app
+# Clone/update app (your fork)
 log "${CYAN}Cloning/updating application repo...${NC}"
 mkdir -p /opt
-if [ -d /opt/asterisk_to_openai_rt_community/.git ]; then
-  git -C /opt/asterisk_to_openai_rt_community pull --ff-only || true
+if [ -d "${APP_DIR}/.git" ]; then
+  git -C "${APP_DIR}" pull --ff-only || true
 else
-  git clone https://github.com/maladrill/asterisk_to_openai_rt_community.git /opt/asterisk_to_openai_rt_community
+  git clone https://github.com/maladrill/asterisk_to_openai_rt_community.git "${APP_DIR}"
 fi
-cd /opt/asterisk_to_openai_rt_community
-# Prefer npm install; if package-lock exists and you want stricter, switch to npm ci
+cd "${APP_DIR}"
 npm install
 
-# Update app config
+# Update existing config.conf from repo (do not recreate)
 log "${CYAN}Updating application config.conf...${NC}"
-touch config.conf
-set_kv_in_file config.conf "ARI_USERNAME" "$ARI_USERNAME"
-set_kv_in_file config.conf "ARI_PASSWORD" "$ARI_PASSWORD"
-set_kv_in_file config.conf "ARI_URL" "$ARI_URL"
-# NOTE: You must add OPENAI_API_KEY manually.
+if [ ! -f config.conf ]; then
+  echo -e "${RED}config.conf not found in ${APP_DIR}. Aborting.${NC}"
+  exit 1
+fi
+cp -a config.conf "config.conf.bak.$(date +%s)" || true
+
+# Prompt for OPENAI_API_KEY (optional: blank = keep current)
+if [ -t 0 ]; then
+  echo -n "Enter your OPENAI_API_KEY (leave blank to keep existing): "
+  read -rs _KEY; echo
+  if [ -n "${_KEY}" ]; then
+    update_env_kv config.conf "OPENAI_API_KEY" "${_KEY}"
+  fi
+fi
+
+# Write only the keys the app expects
+update_env_kv config.conf "ARI_URL"       "${ARI_URL}"
+update_env_kv config.conf "ARI_USERNAME"  "${ARI_USERNAME}"
+update_env_kv config.conf "ARI_PASSWORD"  "${ARI_PASSWORD}"
+
+# Permissions
+chown "${RUN_USER}:${RUN_USER}" config.conf 2>/dev/null || true
+chmod 600 config.conf 2>/dev/null || true
 
 # systemd service
 log "${CYAN}Configuring systemd service asterisk-openai.service...${NC}"
-RUN_USER="root"; id -u asterisk >/dev/null 2>&1 && RUN_USER="asterisk"
-SERVICE_FILE="/etc/systemd/system/asterisk-openai.service"
 safe_backup "$SERVICE_FILE"
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
@@ -478,8 +391,8 @@ Description=Asterisk to OpenAI Realtime Service
 After=network.target asterisk.service
 
 [Service]
-ExecStart=/usr/bin/node /opt/asterisk_to_openai_rt_community/index.js
-WorkingDirectory=/opt/asterisk_to_openai_rt_community
+ExecStart=/usr/bin/node ${APP_DIR}/index.js
+WorkingDirectory=${APP_DIR}
 Restart=always
 User=${RUN_USER}
 Environment=NODE_ENV=production
@@ -494,19 +407,12 @@ systemctl restart asterisk-openai.service || true
 
 # ===== Summary =====
 echo -e "\n${GREEN}${BOLD}Installation Summary:${NC}"
-echo "- Environment: ${ENV}"
+echo "- Files used: http_custom.conf, ari_general_custom.conf, ari_additional_custom.conf"
 echo "- ARI URL: ${ARI_URL}"
 echo "- ARI user: ${ARI_USERNAME} / ${ARI_PASSWORD}"
-if [ "$ENV" = "freepbx" ]; then
-  echo "- Dialplan: [from-internal-custom] exten 9999 (extensions_custom.conf)"
-  echo "- SIP: manage endpoints from FreePBX GUI (no pjsip.conf writes)"
-else
-  echo "- Dialplan: [default] exten 9999 (extensions.conf)"
-  [ -n "${DEBIAN_SIP_PASS}" ] && echo "- SIP endpoint 1005 password: ${DEBIAN_SIP_PASS}"
-  echo "- SIP: written to pjsip_custom.conf (transport-udp, 1005 endpoint/auth/aor)"
-fi
+echo "- Dialplan: [from-internal-custom] exten 9999 (extensions_custom.conf)"
 echo "- Service: systemd unit asterisk-openai.service"
-echo "- App path: /opt/asterisk_to_openai_rt_community"
+echo "- App path: ${APP_DIR}"
 echo "- Full log: ${LOGFILE}"
 
 # ===== Verification =====
@@ -515,12 +421,9 @@ verify_http_enabled
 verify_ari_user_plain
 verify_dialplan_loaded
 verify_ari_http_auth
-verify_service_active
+verify_service_active_or_report
 print_verification_summary
 
-# ===== FreePBX manual =====
-if [ "$ENV" = "freepbx" ]; then
-  print_freepbx_manual
-fi
+print_freepbx_manual
 
 echo -e "${GREEN}Done.${NC}"
