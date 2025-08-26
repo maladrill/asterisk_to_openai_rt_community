@@ -19,7 +19,7 @@ Welcome! This Node.js application integrates Asterisk 22 with the OpenAI Realtim
 | OS            | Debian 1                            |
 | Software      | FreePX7
 | Network       | - Ports: 8088 (ARI), 12000+ (RTP)<br>- Access to `wss://api.openai.com/v1/realtime` |
-| Credentials   | - OpenAI API key (`OPENAI_API_KEY`) - prepare the key before the insallation 
+| Credentials   | - OpenAI API key (`OPENAI_API_KEY`) - prepare the key before the installation 
 
 ---
 
@@ -48,7 +48,7 @@ Option B) Create a Custom Destination and a Misc Application
      - Description: OpenAI Realtime (9999)
      - Return: No
      - Submit, then Apply Config
-
+!{Screenshot] https://github.com/maladrill/asterisk_to_openai_rt_community/custom_destinations.png
   2) Applications → Misc Applications → Add
      - Description: OpenAI Realtime
      - Feature Code: *9999   (or 9999 if you prefer)
