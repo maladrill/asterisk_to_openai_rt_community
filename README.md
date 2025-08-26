@@ -48,7 +48,7 @@ Option B) Create a Custom Destination and a Misc Application
      - Description: OpenAI Realtime (9999)
      - Return: No
      - Submit, then Apply Config
-!{Screenshot] https://github.com/maladrill/asterisk_to_openai_rt_community/custom_destinations.png
+!{Screenshot](https://github.com/maladrill/asterisk_to_openai_rt_community/custom_destinations.png)
   2) Applications → Misc Applications → Add
      - Description: OpenAI Realtime
      - Feature Code: *9999   (or 9999 if you prefer)
