@@ -49,7 +49,7 @@ Option B) Create a Custom Destination and a Misc Application
      - Return: No
      - Submit, then Apply Config
      - 
-![Screenshot](https://github.com/maladrill/asterisk_to_openai_rt_community/custom_destinations.png](https://github.com/maladrill/asterisk_to_openai_rt_community/blob/main/custom_destinations.png)
+![Screenshot](https://github.com/maladrill/asterisk_to_openai_rt_community/blob/main/custom_destinations.png)
 
   2) Applications → Misc Applications → Add
      - Description: OpenAI Realtime
