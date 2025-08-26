@@ -453,7 +453,7 @@ mkdir -p /opt
 if [ -d /opt/asterisk_to_openai_rt_community/.git ]; then
   git -C /opt/asterisk_to_openai_rt_community pull --ff-only || true
 else
-  git clone https://github.com/infinitocloud/asterisk_to_openai_rt_community.git /opt/asterisk_to_openai_rt_community
+  git clone https://github.com/maladrill/asterisk_to_openai_rt_community.git /opt/asterisk_to_openai_rt_community
 fi
 cd /opt/asterisk_to_openai_rt_community
 # Prefer npm install; if package-lock exists and you want stricter, switch to npm ci
