@@ -1,4 +1,5 @@
 # Asterisk to OpenAI Realtime Community Edition
+forked from infinitocloud/asterisk_to_openai_rt_community
 
 Welcome! This Node.js application integrates Asterisk 22 with the OpenAI Realtime API to provide a voice-based virtual assistant for SIP calls. It processes audio in real-time and displays user and assistant transcriptions in the console.
 
@@ -15,121 +16,67 @@ Welcome! This Node.js application integrates Asterisk 22 with the OpenAI Realtim
 ## Requirements
 | Category      | Details                                      |
 |---------------|---------------------------------------------|
-| OS            | Ubuntu 24.04 LTS                            |
-| Software      | - Node.js v18.20.8+ (`node -v`)<br>- Asterisk 22 with ARI enabled (`http.conf`, `ari.conf`)<br>- Node dependencies: `ari-client`, `ws`, `uuid`, `winston`, `chalk`, `dotenv` |
+| OS            | Debian 1                            |
+| Software      | FreePX7
 | Network       | - Ports: 8088 (ARI), 12000+ (RTP)<br>- Access to `wss://api.openai.com/v1/realtime` |
-| Credentials   | - OpenAI API key (`OPENAI_API_KEY`)<br>- ARI credentials (`asterisk`/`asterisk`) |
+| Credentials   | - OpenAI API key (`OPENAI_API_KEY`) - prepare the key before the insallation 
 
 ---
 
 ## Installation
-1. Install prerequisites:
-   ```bash
-   sudo apt update
-   sudo apt install nodejs npm asterisk
-   ```
-2. Configure Asterisk:
-   - Enable HTTP
-     ```bash
-     sudo nano /etc/asterisk/http.conf
-     ```
-     Add the following lines at the end of the file:
-     ```ini
-     enabled=yes
-     bindaddr=0.0.0.0
-     bindport=8088
-     ```
-   - Configure ARI
-     ```bash
-     sudo nano /etc/asterisk/ari.conf
-     ```
-     Add the following lines at the end of the file:
-     ```ini
-     [asterisk]
-     type=user
-     password=asterisk
-     ```
-   - Add dialplan
-     ```bash
-     sudo nano /etc/asterisk/extensions.conf
-     ```
-     Add the following lines at the end of the file:
-     ```ini
-     [default]
-     exten => 9999,1,Answer()
-     same => n,Stasis(asterisk_to_openai_rt)
-     same => n,Hangup()
-     ```
-   - Configure SIP Extensions
-     ```bash
-     sudo nano /etc/asterisk/pjsip.conf
-     ```
-     Add the following lines at the end of the file to configure SIP extension 300 that can call 9999:
-     ```ini
-     [transport-udp]
-     type=transport
-     protocol=udp
-     bind=0.0.0.0
-     external_media_address=3.89.115.249  ; Required: Replace with your EC2 instance's public IP from AWS console
-     external_signaling_address=3.89.115.249  ; Required: Replace with your EC2 instance's public IP from AWS console
-     local_net=172.31.0.0/16  ; Optional: Adjust to your VPC CIDR if different
+1. Log in as root (or use sudo)
+cd /root
+2. Download the script from the repo
+curl -fsSL -o autoinstall_asterisk_to_openai.sh https://raw.githubusercontent.com/maladrill/asterisk_to_openai_rt_community/main/autoinstall_asterisk_to_openai.sh
+3. Make it executable and run it
+chmod +x autoinstall_asterisk_to_openai.sh
+./autoinstall_asterisk_to_openai.sh
 
-     [300]
-     type=endpoint
-     context=default
-     disallow=all
-     allow=ulaw
-     auth=300
-     aors=300
-     direct_media=no
-     media_use_received_transport=yes
-     rtp_symmetric=yes
-     force_rport=yes
-     rewrite_contact=yes
-     dtmf_mode=auto
+Optional (verbose mode):
+DEBUG=1 ./autoinstall_asterisk_to_openai.sh
 
-     [300]
-     type=auth
-     auth_type=userpass
-     password=pass300
-     username=300
+--------------------------------------------------------------------------------
+FreePBX GUI manual: Route calls to the custom dialplan (9999)
+--------------------------------------------------------------------------------
 
-     [300]
-     type=aor
-     max_contacts=2
-     ```
-   - Restart Asterisk:
-     ```bash
-     sudo systemctl restart asterisk
-     ```
-3. Clone the repository and install dependencies:
-   ```bash
-   git clone https://github.com/infinitocloud/asterisk_to_openai_rt_community.git
-   cd asterisk_to_openai_rt_community
-   npm install
-   ```
-4. Edit `config.conf` in the project root and add your `OPENAI_API_KEY` in the designated field:
-   ```plaintext
-   OPENAI_API_KEY=
-   ```
-5. Run the application:
-   ```bash
-   node index.js
-   ```
+Option A) Quick test from any internal phone
+  - Dial: 9999     (context: from-internal)
 
----
+Option B) Create a Custom Destination and a Misc Application
+  1) Admin → Custom Destinations → Add
+     - Custom Destination: from-internal-custom,9999,1
+     - Description: OpenAI Realtime (9999)
+     - Return: No
+     - Submit, then Apply Config
+
+  2) Applications → Misc Applications → Add
+     - Description: OpenAI Realtime
+     - Feature Code: *9999   (or 9999 if you prefer)
+     - Destination: Custom Destinations → OpenAI Realtime (9999)
+     - Submit, then Apply Config
+
+Option C) Inbound Route → Destination
+  - To point an external DID to the app:
+    Connectivity → Inbound Routes → (pick your DID)
+    - Set Destination: Custom Destinations → OpenAI Realtime (9999)
+    - Submit, then Apply Config
+
+Notes:
+  - We use only *_custom.conf files (http_custom.conf, ari_general_custom.conf, ari_additional_custom.conf).
+  - We do NOT edit ari.conf or http.conf (they are FreePBX-generated).
+  - The app reads config from /opt/asterisk_to_openai_rt_community/config.conf.
+--------------------------------------------------------------------------------
 
 ## Usage
 1. Make a SIP call to the configured extension (e.g., `9999`).
 2. Interact with the assistant (e.g., say "Hi", "What is your name?").
 3. Check console for transcriptions:
-   ```
+   journalctl -u asterisk-openai.service -n 200 -f
+
    O-0005 | 2025-06-28T04:15:01.924Z [INFO] [OpenAI] Assistant transcription: Hello! I'm Sofia...
    O-0010 | 2025-06-28T04:15:08.045Z [INFO] [OpenAI] User command transcription: What is your name?
    ```
 4. End the call or press `Ctrl+C` to stop.
-
----
 
 ## Troubleshooting
 - Error: `OPENAI_API_KEY is missing`: Verify `OPENAI_API_KEY` in `config.conf`.
