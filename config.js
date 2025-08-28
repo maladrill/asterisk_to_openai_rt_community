@@ -11,6 +11,7 @@ const config = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   REALTIME_URL: `wss://api.openai.com/v1/realtime?model=${process.env.REALTIME_MODEL || 'gpt-4o-mini-realtime-preview-2024-12-17'}`,
   OPENAI_VOICE: process.env.OPENAI_VOICE,
+  RECORDINGS_DIR: process.env.RECORDINGS_DIR || '/var/spool/asterisk/monitor',
   TRANSCRIPTION_MODEL: process.env.TRANSCRIPTION_MODEL || 'whisper-1',
   TRANSCRIPTION_LANGUAGE: process.env.TRANSCRIPTION_LANGUAGE || 'en',
   RTP_PORT_START: 12000,
