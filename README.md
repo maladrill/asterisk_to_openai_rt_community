@@ -74,7 +74,7 @@ Notes:
 2. Interact with the assistant (e.g., say "Hi", "What is your name?").
 3. Check console for transcriptions:
    journalctl -u asterisk-openai.service -n 200 -f
-
+   ```
    O-0005 | 2025-06-28T04:15:01.924Z [INFO] [OpenAI] Assistant transcription: Hello! I'm Sofia...
    O-0010 | 2025-06-28T04:15:08.045Z [INFO] [OpenAI] User command transcription: What is your name?
    ```
@@ -82,12 +82,11 @@ Notes:
 
 ## Troubleshooting
 - Error: `OPENAI_API_KEY is missing`: Verify `OPENAI_API_KEY` in `config.conf`.
-- Error: `ARI connection error`: Check Asterisk (`sudo systemctl status asterisk`, port 8088). Run: sudo asterisk -rx "ari show status"
+- Error: `ARI connection error`: Check Asterisk (`sudo systemctl status asterisk`, port 8088). Run: `sudo asterisk -rx "ari show status"`
 - No transcriptions: Set `LOG_LEVEL=debug` in `config.conf`.
 - Debug commands:
   - Asterisk logs: `tail -f /var/log/asterisk/messages`
-  - Node.js debug: `node --inspect index.js`
-- Wrong password on SIP registration: Ensure the SIP phone username is `300` and password is `pass300`. Verify the server IP matches your Asterisk instance.
+  - Node.js debug: `cd /opt/asterisk_to_openai_rt_community` and then: `node --inspect index.js`
 - No audio: Ensure `external_media_address` and `external_signaling_address` in `pjsip.conf` match your EC2 public IP. Verify RTP ports (12000+) are open in EC2 security group and local firewall. Update `asterisk.js` `external_host` to use the server’s IP.
 
 ---
