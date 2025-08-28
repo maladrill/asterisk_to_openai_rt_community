@@ -221,10 +221,10 @@ async function startOpenAIWebSocket(channelId) {
             instructions: config.SYSTEM_PROMPT,
             input_audio_format: 'g711_ulaw',
             output_audio_format: 'g711_ulaw',
-            input_audio_transcription: {
-              model: 'whisper-1',
-              language: 'en'
-            },
+      input_audio_transcription: {
+        model: config.TRANSCRIPTION_MODEL || 'whisper-1',
+        language: config.TRANSCRIPTION_LANGUAGE || 'en'
+      },
             turn_detection: {
               type: 'server_vad',
               threshold: config.VAD_THRESHOLD || 0.6,
