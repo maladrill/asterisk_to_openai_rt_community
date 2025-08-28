@@ -183,7 +183,14 @@ async function initializeAriClient() {
           connection_type: 'client',
           direction: 'both'
         };
-        sipMap.set(channel.id, { bridgeId, channelId: channel.id, bridge, channel, rtpPort: port, wsClosed: false });
+      const callerId = (
+        channel?.caller?.number ||
+        channel?.caller?.name ||
+        channel?.connected?.number ||
+        channel?.connected?.name ||
+        ''
+      ).toString();
+        sipMap.set(channel.id, { bridgeId, channelId: channel.id, bridge, channel, rtpPort: port, wsClosed: false, callerId });
         const extChannel = await ariClient.channels.externalMedia(extParams);
         logger.info(`ExternalMedia channel ${extChannel.id} created with codec ulaw, RTP to 127.0.0.1:${port}`);
         extMap.set(extChannel.id, { bridgeId, channelId: channel.id });
