@@ -1,7 +1,7 @@
-# Asterisk to OpenAI Realtime Community Edition
+# FreePBX to OpenAI Realtime Community Edition
 forked from infinitocloud/asterisk_to_openai_rt_community
 
-Welcome! This Node.js application integrates Asterisk 22 with the OpenAI Realtime API to provide a voice-based virtual assistant for SIP calls. It processes audio in real-time and displays user and assistant transcriptions in the console.
+Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI Realtime API to provide a voice-based virtual assistant for SIP calls. It processes audio in real-time and displays user and assistant transcriptions in the console. 
 
 ---
 
