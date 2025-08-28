@@ -3,7 +3,54 @@ const { v4: uuid } = require('uuid');
 const { config, logger, logClient, logOpenAI } = require('./config');
 const { sipMap, cleanupPromises } = require('./state');
 const { streamAudio, rtpEvents } = require('./rtp');
+const fs = require('fs');
+const path = require('path');
 
+// --- transcript helpers ---
+function safeCallerId(channelId) {
+  const info = sipMap.get(channelId);
+  let cid = info?.callerId;
+  if (typeof cid === 'object' && cid) {
+    cid = cid.number || cid.name || cid.id;
+  }
+  cid = (cid || '').toString().trim();
+  cid = cid.replace(/[^\d+]/g, '');
+  return cid || 'unknown';
+}
+
+function ensureDailyDir() {
+  const root = config.RECORDINGS_DIR || '/var/spool/asterisk/monitor';
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const dir = path.join(root, yyyy, mm, dd);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    logger.error(`Failed to create transcripts dir ${dir}: ${e.message}`);
+  }
+  return dir;
+}
+
+function transcriptPath(channelId) {
+  const dir = ensureDailyDir();
+  const callerId = safeCallerId(channelId);
+  return path.join(dir, `conversation-${callerId}-${channelId}.txt`);
+}
+
+function appendTranscript(channelId, who, text) {
+  if (!text || !text.trim()) return;
+  try {
+    const file = transcriptPath(channelId);
+    const line = `${new Date().toISOString()} ${who}: ${text}\n`;
+    fs.appendFile(file, line, (err) => {
+      if (err) logger.error(`Failed to write transcript for ${channelId}: ${err.message}`);
+    });
+  } catch (e) {
+    logger.error(`Transcript write error for ${channelId}: ${e.message}`);
+  }
+}
 logger.info('Loading openai.js module');
 
 async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval = 10) {
@@ -163,8 +210,10 @@ async function startOpenAIWebSocket(channelId) {
             logger.debug(`Transcript done - Full message: ${JSON.stringify(response, null, 2)}`);
             if (role === 'User') {
               logOpenAI(`User command transcription for ${channelId}: ${response.transcript}`, 'info');
+              appendTranscript(channelId, 'USER', response.transcript);
             } else {
               logOpenAI(`Assistant transcription for ${channelId}: ${response.transcript}`, 'info');
+              appendTranscript(channelId, 'ASSISTANT', response.transcript);
             }
           }
           break;
@@ -178,6 +227,7 @@ async function startOpenAIWebSocket(channelId) {
           if (response.transcript) {
             logger.debug(`User transcript completed - Full message: ${JSON.stringify(response, null, 2)}`);
             logOpenAI(`User command transcription for ${channelId}: ${response.transcript}`, 'info');
+            appendTranscript(channelId, 'USER', response.transcript);
           }
           break;
         case 'response.audio.done':
@@ -221,11 +271,10 @@ async function startOpenAIWebSocket(channelId) {
             instructions: config.SYSTEM_PROMPT,
             input_audio_format: 'g711_ulaw',
             output_audio_format: 'g711_ulaw',
-      input_audio_transcription: {
-        model: config.TRANSCRIPTION_MODEL || 'whisper-1',
-        language: config.TRANSCRIPTION_LANGUAGE || 'en'
-      },
-            turn_detection: {
+input_audio_transcription: {
+  model: config.TRANSCRIPTION_MODEL || 'whisper-1',
+  language: config.TRANSCRIPTION_LANGUAGE || 'en'
+},            turn_detection: {
               type: 'server_vad',
               threshold: config.VAD_THRESHOLD || 0.6,
               prefix_padding_ms: config.VAD_PREFIX_PADDING_MS || 200,
