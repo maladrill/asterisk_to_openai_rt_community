@@ -38,11 +38,8 @@ DEBUG=1 ./autoinstall_asterisk_to_openai.sh
 4. Go to /opt/asterisk_to_openai_rt_community/config.conf and change what you need: 
 - SYSTEM_PROMPT - it is the instruction for the assistant
 - OPENAI_VOICE - voices you can use are: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', and 'cedar'.
-- TRANSCRIPTION_LANGUAGE - supported langages:  'af'=>'Afrikaans','ar'=>'Arabic','hy'=>'Armenian','az'=>'Azerbaijani','be'=>'Belarusian','bs'=>'Bosnian','bg'=>'Bulgarian','ca'=>'Catalan', 'zh'=>'Chinese','hr'=>'Croatian','cs'=>'Czech','da'=>'Danish','nl'=>'Dutch','en'=>'English','et'=>'Estonian','fi'=>'Finnish','fr'=>'French', 'gl'=>'Galician','de'=>'German','el'=>'Greek','he'=>'Hebrew','hi'=>'Hindi','hu'=>'Hungarian','is'=>'Icelandic','id'=>'Indonesian','it'=>'Italian',   'ja'=>'Japanese','kn'=>'Kannada','kk'=>'Kazakh','ko'=>'Korean','lv'=>'Latvian','lt'=>'Lithuanian','mk'=>'Macedonian','ms'=>'Malay','mr'=>'Marathi', 'mi'=>'Maori','ne'=>'Nepali','no'=>'Norwegian','fa'=>'Persian','pl'=>'Polish','pt'=>'Portuguese','ro'=>'Romanian','ru'=>'Russian','sr'=>'Serbian', 'sk'=>'Slovak','sl'=>'Slovenian','es'=>'Spanish','sw'=>'Swahili','sv'=>'Swedish','tl'=>'Tagalog','ta'=>'Tamil','th'=>'Thai','tr'=>'Turkish', 'uk'=>'Ukrainian','ur'=>'Urdu','vi'=>'Vietnamese','cy'=>'Welsh',
+- TRANSCRIPTION_LANGUAGE - supported langages: af=Afrikaans, ar=Arabic, hy=Armenian, az=Azerbaijani, be=Belarusian, bs=Bosnian, bg=Bulgarian, ca=Catalan, zh=Chinese, hr=Croatian, cs=Czech, da=Danish, nl=Dutch, en=English, et=Estonian, fi=Finnish, fr=French, gl=Galician, de=German, el=Greek, he=Hebrew, hi=Hindi, hu=Hungarian, is=Icelandic, id=Indonesian, it=Italian, ja=Japanese, kn=Kannada, kk=Kazakh, ko=Korean, lv=Latvian, lt=Lithuanian, mk=Macedonian, ms=Malay, mr=Marathi, mi=Maori, ne=Nepali, no=Norwegian, fa=Persian, pl=Polish, pt=Portuguese, ro=Romanian, ru=Russian, sr=Serbian, sk=Slovak, sl=Slovenian, es=Spanish, sw=Swahili, sv=Swedish, tl=Tagalog, ta=Tamil, th=Thai, tr=Turkish, uk=Ukrainian, ur=Urdu, vi=Vietnamese, cy=Welsh
 - RECORDINGS_DIR - Directory where call transcriptions are being stored. Default is /var/spool/asterisk/monitor. Transcriptions are being saved to RECORDINGS_DIR/YYYY/MM/DD
-
-
-
 
 --------------------------------------------------------------------------------
 FreePBX GUI manual: Route calls to the custom dialplan (9999)
