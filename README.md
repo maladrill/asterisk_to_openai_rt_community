@@ -7,7 +7,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 
 ## Features
 - Real-time audio processing with Asterisk and OpenAI.
-- Console transcriptions for user and assistant speech.
+- Console transcriptions for user and assistant speech and conversations saved as text files to asterisk recordings locations.
 - Clean resource management (channels, bridges, WebSocket, RTP).
 - Configurable via `config.conf` (e.g., API key, prompt).
 
