@@ -25,7 +25,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 
 ## Installation
 1. Log in as root (or use sudo) 
-```cd /root```
+`cd /root`
 2. Download the script from the repo
 ```curl -fsSL -o autoinstall_asterisk_to_openai.sh https://raw.githubusercontent.com/maladrill/asterisk_to_openai_rt_community/main/autoinstall_asterisk_to_openai.sh```
 3. Make it executable and run it (but have OpnAI key prepared as it will be used during the installation)
