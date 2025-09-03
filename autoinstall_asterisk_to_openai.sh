@@ -23,9 +23,10 @@ err() {
 }
 trap err ERR
 
-# ========= Colors =========
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
-OK="${GREEN}✔${NC}"; FAIL="${RED}✖${NC}"; WARN="${YELLOW}!${NC}"
+# ========= Colors (ANSI) =========
+ESC=$(printf '\033')
+RED="${ESC}[0;31m"; GREEN="${ESC}[0;32m"; YELLOW="${ESC}[1;33m"; CYAN="${ESC}[0;36m"; BOLD="${ESC}[1m"; NC="${ESC}[0m"
+OK="${GREEN}OK${NC}"; FAIL="${RED}FAIL${NC}"; WARN="${YELLOW}WARN${NC}"
 
 # ========= Globals =========
 HTTP_ADDR="127.0.0.1"
