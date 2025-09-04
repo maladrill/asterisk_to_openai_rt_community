@@ -39,18 +39,27 @@ function transcriptPath(channelId) {
   return path.join(dir, `conversation-${callerId}-${channelId}.txt`);
 }
 
+// Log the path once per file to make debugging easier
+const _loggedTranscriptPath = new Set();
+
 function appendTranscript(channelId, who, text) {
   if (!text || !text.trim()) return;
   try {
     const file = transcriptPath(channelId);
     const line = `${new Date().toISOString()} ${who}: ${text}\n`;
     fs.appendFile(file, line, (err) => {
-      if (err) logger.error(`Failed to write transcript for ${channelId}: ${err.message}`);
+      if (err) {
+        logger.error(`Failed to write transcript for ${channelId}: ${err.message}`);
+      } else if (!_loggedTranscriptPath.has(file)) {
+        _loggedTranscriptPath.add(file);
+        logger.info(`Transcript file path for ${channelId}: ${file}`);
+      }
     });
   } catch (e) {
     logger.error(`Transcript write error for ${channelId}: ${e.message}`);
   }
 }
+
 logger.info('Loading openai.js module');
 
 async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval = 10) {
@@ -84,6 +93,7 @@ async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval =
     (!streamHandler.audioBuffer || streamHandler.audioBuffer.length === 0) &&
     (!streamHandler.packetQueue || streamHandler.packetQueue.length === 0)
   );
+
   if (!isBufferEmpty()) {
     let lastLogTime = 0;
     while (!isBufferEmpty() && (Date.now() - startWaitTime) < maxWaitTime) {
@@ -141,15 +151,21 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
   let itemRoles = new Map();
   let lastUserItemId = null;
 
+  // --- NEW: graceful terminate flags ---
+  let terminateRequested = false;
+  let terminateReason = null;
+
   const processMessage = async (response) => {
     try {
       switch (response.type) {
         case 'session.created':
           logClient(`Session created for ${channelId}`);
           break;
+
         case 'session.updated':
           logOpenAI(`Session updated for ${channelId}`);
           break;
+
         case 'conversation.item.created':
           logOpenAI(`Conversation item created for ${channelId}`);
           if (response.item && response.item.id && response.item.role) {
@@ -165,9 +181,11 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
             }
           }
           break;
+
         case 'response.created':
           logOpenAI(`Response created for ${channelId}`);
           break;
+
         case 'response.audio.delta':
           if (response.delta) {
             const deltaBuffer = Buffer.from(response.delta, 'base64');
@@ -199,53 +217,52 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
             }
           }
           break;
+
         case 'response.audio_transcript.delta':
           if (response.delta) {
             logger.debug(`Transcript delta for ${channelId}: ${response.delta.trim()}`);
             logger.debug(`Full transcript delta message: ${JSON.stringify(response, null, 2)}`);
           }
           break;
-        case 'response.audio_transcript.done':
-if (response.transcript) {
-  // We ALWAYS treat this part as an ASSISTANT transcript
-  logger.debug(`Transcript done - Full message: ${JSON.stringify(response, null, 2)}`);
-  const txt = (response.transcript || '').toLowerCase().normalize('NFKC');
 
-  // Save to the file
-  appendTranscript(channelId, 'ASSISTANT', response.transcript);
+        case 'response.audio_transcript.done': {
+          if (response.transcript) {
+            logger.debug(`Transcript done - Full message: ${JSON.stringify(response, null, 2)}`);
+            const txt = (response.transcript || '').toLowerCase().normalize('NFKC');
 
-  // --- TERMINATE: terminate phrase
-  if (Array.isArray(config.AGENT_TERMINATE_PHRASES) && config.AGENT_TERMINATE_PHRASES.length) {
-    const matched = config.AGENT_TERMINATE_PHRASES.find(p => txt.includes(p));
-    if (matched && typeof onTerminateRequest === 'function') {
-      const cd = sipMap.get(channelId) || {};
-      if (!cd.terminating) {
-        cd.terminating = true;
-        sipMap.set(channelId, cd);
-        logger.info(`Assistant termination phrase matched ("${matched}") for ${channelId}`);
-        onTerminateRequest(channelId, matched);
-      }
-    }
-  }
+            // Save assistant text to transcript
+            appendTranscript(channelId, 'ASSISTANT', response.transcript);
 
-// --- REDIRECT: assistant offers human/queue handoff
-if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.length) {
-  const txt = (response.transcript || '').toLowerCase().normalize('NFKC');
-  const matched = config.REDIRECTION_PHRASES.find(p => txt.includes(p));
-  if (matched && typeof onRedirectRequest === 'function') {
-    logger.info(`Assistant redirect phrase matched ("${matched}") for ${channelId}; requesting queue handoff`);
-    // UWAGA: nie ustawiamy tutaj żadnych flag w sipMap!
-    onRedirectRequest(channelId, matched);
-  }
-}
-        }
+            // --- TERMINATE: mark only; do NOT cleanup yet
+            if (Array.isArray(config.AGENT_TERMINATE_PHRASES) && config.AGENT_TERMINATE_PHRASES.length) {
+              const matched = config.AGENT_TERMINATE_PHRASES.find(p => txt.includes(p));
+              if (matched) {
+                terminateRequested = true;
+                terminateReason = matched;
+                logger.info(`Assistant termination phrase matched ("${matched}") for ${channelId}; will terminate after playback completes`);
+              }
+            }
+
+            // --- REDIRECT: assistant offers human/queue handoff
+            if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.length) {
+              const matched = config.REDIRECTION_PHRASES.find(p => txt.includes(p));
+              if (matched && typeof onRedirectRequest === 'function') {
+                logger.info(`Assistant redirect phrase matched ("${matched}") for ${channelId}; requesting queue handoff`);
+                // UWAGA: nie ustawiamy tutaj żadnych flag w sipMap!
+                onRedirectRequest(channelId, matched);
+              }
+            }
+          }
           break;
+        }
+
         case 'conversation.item.input_audio_transcription.delta':
           if (response.delta) {
             logger.debug(`User transcript delta for ${channelId}: ${response.delta.trim()}`);
             logger.debug(`Full user transcript delta message: ${JSON.stringify(response, null, 2)}`);
           }
           break;
+
         case 'conversation.item.input_audio_transcription.completed':
           if (response.transcript) {
             logger.debug(`User transcript completed - Full message: ${JSON.stringify(response, null, 2)}`);
@@ -253,6 +270,7 @@ if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.leng
             appendTranscript(channelId, 'USER', response.transcript);
           }
           break;
+
         case 'response.audio.done':
           logOpenAI(`Response audio done for ${channelId}, total delta bytes: ${totalDeltaBytes}, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`, 'info');
           isResponseActive = false;
@@ -261,11 +279,28 @@ if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.leng
           itemRoles.clear();
           lastUserItemId = null;
           responseBuffer = Buffer.alloc(0);
+
+          // --- NEW: graceful hangup after full playback if requested
+          if (terminateRequested && typeof onTerminateRequest === 'function') {
+            try {
+              await waitForBufferEmpty(channelId, 8000, 10); // wait for RTP queue + audioFinished
+              await new Promise(r => setTimeout(r, 250));     // tail silence to ensure PSTN hears the end
+              onTerminateRequest(channelId, terminateReason);
+            } catch (e) {
+              logger.warn(`Graceful terminate wait failed for ${channelId}: ${e.message}. Proceeding with cleanup.`);
+              onTerminateRequest(channelId, terminateReason);
+            } finally {
+              terminateRequested = false;
+              terminateReason = null;
+            }
+          }
           break;
+
         case 'error':
           logger.error(`OpenAI error for ${channelId}: ${response.error.message}`);
           ws.close();
           break;
+
         default:
           logger.debug(`Unhandled event type: ${response.type} for ${channelId}`);
           break;
@@ -294,10 +329,11 @@ if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.leng
             instructions: config.SYSTEM_PROMPT,
             input_audio_format: 'g711_ulaw',
             output_audio_format: 'g711_ulaw',
-input_audio_transcription: {
-  model: config.TRANSCRIPTION_MODEL || 'whisper-1',
-  language: config.TRANSCRIPTION_LANGUAGE || 'en'
-},            turn_detection: {
+            input_audio_transcription: {
+              model: config.TRANSCRIPTION_MODEL || 'whisper-1',
+              language: config.TRANSCRIPTION_LANGUAGE || 'en'
+            },
+            turn_detection: {
               type: 'server_vad',
               threshold: config.VAD_THRESHOLD || 0.6,
               prefix_padding_ms: config.VAD_PREFIX_PADDING_MS || 200,
@@ -394,4 +430,4 @@ input_audio_transcription: {
   }
 }
 
-module.exports = { startOpenAIWebSocket };
+module.exports = { startOpenAIWebSocket, transcriptPath };
