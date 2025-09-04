@@ -8,6 +8,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 ## Features
 - Real-time audio processing with Asterisk and OpenAI.
 - Console transcriptions for user and assistant speech; *conversations saved as text file*s in the Asterisk recordings path (/var/spool/asterisk/monitor/YYYY/MM/DD as conversation-{callerID}-{unique.id}.txt.
+- Transcripts sending using SMPT
 - Clean resource management (channels, bridges, WebSocket, RTP).
 - Configurable via `config.conf` (e.g., API key, prompt).
 - **Assistant-triggered Queue Handoff**: when the **assistant** says a configured phrase, the active call is transferred to a FreePBX Queue (e.g., L1 support).
