@@ -7,25 +7,21 @@ const { startOpenAIWebSocket } = require('./openai');
 
 let ariClient;
 
-// How long we wait for both SIP and ExternalMedia channels to end before forcing cleanup.
+// How long to wait for both legs to end before forcing cleanup
 const CLEANUP_GRACE_MS = Number(process.env.CLEANUP_GRACE_MS || 1500);
 
-// External-media events that should be ignored because cleanup already ran.
-// We put external channel IDs here when cleanup starts and remove them shortly after.
-// This prevents noisy logs when late StasisEnd/ChannelDestroyed arrive for ExternalMedia.
+// External-media events to ignore after cleanup started (avoid noisy late events)
 const ignoreExtEvents = new Set();
 
 /**
- * Returns true for names like "UnicastRTP/127.0.0.1:12000-...."
- * Used to differentiate ExternalMedia channels from SIP channels.
+ * Return true for "UnicastRTP/..." ExternalMedia channels.
  */
 function isExternalMediaChannel(name = '') {
   return /^UnicastRTP\//.test(name);
 }
 
 /**
- * Add an ExternalMedia channel to a bridge.
- * Throws on failure; caller should catch and log.
+ * Add an ExternalMedia channel to a bridge (throws on failure).
  */
 async function addExtToBridge(client, channel, bridgeId) {
   try {
@@ -39,44 +35,40 @@ async function addExtToBridge(client, channel, bridgeId) {
 }
 
 /**
- * Resolve the owning SIP channel ID for any ARI channel (SIP or ExternalMedia).
- * - For SIP channels, returns the channel's own id.
- * - For ExternalMedia channels, consults extMap and sipMap relationships.
+ * Resolve owning SIP channelId for any ARI channel.
+ * - For SIP channels: returns its own id
+ * - For ExternalMedia channels: consult extMap and sipMap
  */
 function resolveSipIdForChannel(channel) {
   if (!channel) return undefined;
   const { id, name = '' } = channel;
   if (!isExternalMediaChannel(name)) return id;
 
-  // extMap keyed by external channel id → { bridgeId, channelId (SIP) }
-  const entry = extMap.get(id);
+  const entry = extMap.get(id); // externalId → { bridgeId, channelId }
   if (entry && entry.channelId) return entry.channelId;
 
-  // Fallback: scan sipMap for a match in stored external ids
   for (const [sipId, data] of sipMap.entries()) {
-    if (data && (data.externalChannelId === id)) return sipId;
+    if (data && data.externalChannelId === id) return sipId;
   }
   return undefined;
 }
 
 /**
- * Mark flags that a given channel (SIP or External) ended and schedule cleanup.
- * - If both sides have ended, cleanup immediately.
- * - Otherwise, start/refresh a grace timer; on timeout, force cleanup.
- * - If ExternalMedia event arrives after cleanup, ignore it quietly.
+ * Mark that a channel leg ended and schedule cleanup.
+ * - If both legs ended → cleanup immediately.
+ * - Else debounce cleanup with a grace timer.
+ * - If it's a late ExternalMedia event (post-cleanup) → ignore quietly.
  */
 function markChannelEndedAndMaybeCleanup(channel, sourceEvent) {
-  // If this is a late external-media event we intentionally ignore, short-circuit early.
   if (isExternalMediaChannel(channel.name || '') && ignoreExtEvents.has(channel.id)) {
-    logger.info(`ExternalMedia ${channel.id} ${sourceEvent} arrived after cleanup; ignoring`);
+    logger.info(`ExternalMedia ${channel.id} ${sourceEvent} after cleanup; ignoring`);
     return;
   }
 
   const sipId = resolveSipIdForChannel(channel);
   if (!sipId) {
-    // If we cannot resolve owner and it's ExternalMedia, it's very likely a late event post-cleanup.
     if (isExternalMediaChannel(channel.name || '')) {
-      logger.debug(`ExternalMedia ${channel.id} ${sourceEvent} with no owner (probably post-cleanup); ignoring`);
+      logger.debug(`ExternalMedia ${channel.id} ${sourceEvent} with no owner (likely post-cleanup); ignoring`);
       return;
     }
     logger.warn(`Cannot resolve SIP owner for channel ${channel.id} (${channel.name || 'noname'}) on ${sourceEvent}`);
@@ -91,7 +83,6 @@ function markChannelEndedAndMaybeCleanup(channel, sourceEvent) {
 
   sipMap.set(sipId, data);
 
-  // If both sides ended, do it right now.
   if (data._sipEnded && data._extEnded) {
     cleanupChannel(sipId, `${sourceEvent}:both-ended`).catch(e =>
       logger.error(`cleanupChannel error (both-ended) for ${sipId}: ${e.message}`)
@@ -99,7 +90,6 @@ function markChannelEndedAndMaybeCleanup(channel, sourceEvent) {
     return;
   }
 
-  // Debounce a single timer per SIP-id.
   if (data._cleanupTimer) clearTimeout(data._cleanupTimer);
   data._cleanupTimer = setTimeout(() => {
     cleanupChannel(sipId, `${sourceEvent}:grace-timeout`).catch(e =>
@@ -110,13 +100,131 @@ function markChannelEndedAndMaybeCleanup(channel, sourceEvent) {
 }
 
 /**
- * Perform a complete, idempotent cleanup for a given SIP channel id.
- * This tears down websockets, RTP sockets, bridge, channels and clears all maps.
+ * Redirect the live SIP channel to a Queue in dialplan.
+ * This gracefully tears down ExternalMedia/bridge/WS/RTP but keeps the SIP leg alive,
+ * then uses ARI continueInDialplan to jump to the queue.
  *
- * Note: the function accepts an optional 'reason' only for logging.
+ * Safe to call once per call; multiple calls are ignored via a 'redirecting' flag.
+ */
+async function redirectToQueue(sipChannelId, triggerText = '') {
+  const qExt = String(config.REDIRECTION_QUEUE || process.env.REDIRECTION_QUEUE || '').trim();
+  if (!qExt) {
+    logger.error(`REDIRECTION_QUEUE not set; cannot redirect for ${sipChannelId}`);
+    return;
+  }
+  const data = sipMap.get(sipChannelId);
+  if (!data) {
+    logger.warn(`redirectToQueue: channel ${sipChannelId} not in sipMap`);
+    return;
+  }
+  if (data.redirecting) {
+    logger.info(`redirectToQueue: already in progress for ${sipChannelId}`);
+    return;
+  }
+  data.redirecting = true;
+  sipMap.set(sipChannelId, data);
+
+  logger.info(`Redirection requested for ${sipChannelId} to queue ${qExt} (trigger="${triggerText || 'n/a'}")`);
+
+  // 1) Stop WS/audio sending, but DO NOT hangup SIP
+  try {
+    if (data.streamHandler && typeof data.streamHandler.end === 'function') {
+      data.streamHandler.end();
+      logger.info(`Stream handler ended for ${sipChannelId} (handoff)`);
+    }
+  } catch (e) {
+    logger.warn(`Stream handler end failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+
+  try {
+    if (!data.wsClosed && data.ws && typeof data.ws.close === 'function') {
+      data.ws.close();
+      logger.info(`WebSocket close requested for ${sipChannelId} (handoff)`);
+    }
+  } catch (e) {
+    logger.warn(`WS close failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+
+  // 2) Tear down ExternalMedia & bridge so dialplan can take over cleanly
+  try {
+    if (data.externalChannelId && ariClient) {
+      await ariClient.channels.hangup({ channelId: data.externalChannelId }).catch(() => {});
+      logger.info(`External channel ${data.externalChannelId} hangup attempted (handoff)`);
+      ignoreExtEvents.add(data.externalChannelId);
+      setTimeout(() => ignoreExtEvents.delete(data.externalChannelId), 10000);
+    }
+  } catch (e) {
+    logger.warn(`External channel hangup failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+
+  try {
+    if (data.bridge && data.bridge.id && ariClient) {
+      await ariClient.bridges.destroy({ bridgeId: data.bridge.id }).catch(() => {});
+      logger.info(`Bridge ${data.bridge.id} destroyed (handoff)`);
+    }
+  } catch (e) {
+    logger.warn(`Bridge destroy failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+
+  // 3) Close RTP sockets and release the port (media path no longer needed)
+  try {
+    const rx = rtpReceivers.get(sipChannelId);
+    if (rx && rx.isOpen) { rx.isOpen = false; rx.close(); logger.info(`RTP receiver closed for ${sipChannelId} (handoff)`); }
+    rtpReceivers.delete(sipChannelId);
+  } catch (e) {
+    logger.warn(`RTP receiver close failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+  try {
+    const tx = rtpSenders.get(sipChannelId);
+    if (tx && tx.isOpen) { tx.isOpen = false; tx.close(); logger.info(`RTP sender closed for ${sipChannelId} (handoff)`); }
+    rtpSenders.delete(sipChannelId);
+  } catch (e) {
+    logger.warn(`RTP sender close failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+  try {
+    if (typeof data.rtpPort === 'number') {
+      releaseRtpPort(data.rtpPort);
+      logger.info(`Released RTP port ${data.rtpPort} for ${sipChannelId} (handoff)`);
+    }
+  } catch (e) {
+    logger.warn(`releaseRtpPort failed (handoff) for ${sipChannelId}: ${e.message}`);
+  }
+
+  // 4) Continue in dialplan to the Queue
+  const tryContexts = [];
+  if (config.REDIRECTION_QUEUE_CONTEXT) tryContexts.push(config.REDIRECTION_QUEUE_CONTEXT);
+  // FreePBX queue contexts to try in order:
+  tryContexts.push('ext-queues', 'from-internal');
+
+  let continued = false;
+  for (const ctx of tryContexts) {
+    try {
+      await ariClient.channels.continueInDialplan({
+        channelId: sipChannelId,
+        context: ctx,
+        extension: qExt,
+        priority: 1
+      });
+      logger.info(`Channel ${sipChannelId} continued to ${ctx},${qExt},1`);
+      continued = true;
+      break;
+    } catch (e) {
+      logger.warn(`continueInDialplan failed to ${ctx}/${qExt}: ${e.message}`);
+    }
+  }
+
+  if (!continued) {
+    logger.error(`Failed to continue ${sipChannelId} into any queue context (${tryContexts.join(', ')}). Hanging up as fallback.`);
+    try { await ariClient.channels.hangup({ channelId: sipChannelId }); } catch (_) {}
+  }
+}
+
+/**
+ * Full, idempotent cleanup for a given SIP channelId.
+ * Tears down WS, RTP, bridge, ExternalMedia; may hangup SIP as last resort
+ * (unless handoff/redirecting happened).
  */
 async function cleanupChannel(channelId, reason = 'manual') {
-  // Ensure only one cleanup runs per channelId at a time.
   if (cleanupPromises.has(channelId)) {
     await cleanupPromises.get(channelId);
     return;
@@ -126,7 +234,6 @@ async function cleanupChannel(channelId, reason = 'manual') {
     const channelData = sipMap.get(channelId) || {};
     logger.info(`Cleanup started for channel ${channelId} (reason=${reason})`);
 
-    // Make this function idempotent.
     if (channelData._cleaned) {
       logger.info(`Cleanup skipped (already done) for ${channelId}`);
       return;
@@ -134,125 +241,74 @@ async function cleanupChannel(channelId, reason = 'manual') {
     channelData._cleaned = true;
     sipMap.set(channelId, channelData);
 
-    // Cancel grace timer if present.
     if (channelData._cleanupTimer) {
       clearTimeout(channelData._cleanupTimer);
       delete channelData._cleanupTimer;
     }
 
     try {
-      // Before tearing down maps, mark the external media channel as "ignore late events" for a short while.
       if (channelData.externalChannelId) {
         ignoreExtEvents.add(channelData.externalChannelId);
-        // Remove the marker after a few seconds; enough for ARI to flush late events.
         setTimeout(() => ignoreExtEvents.delete(channelData.externalChannelId), 10000);
       }
 
-      // 1) Cancel call duration timer if used.
       if (channelData.callTimeoutId) {
         clearTimeout(channelData.callTimeoutId);
         logger.info(`Call duration timeout cleared for channel ${channelId}`);
       }
 
-      // 2) Stop playback / stream handler (if exposed from RTP).
       if (channelData.streamHandler && typeof channelData.streamHandler.end === 'function') {
-        try {
-          channelData.streamHandler.end();
-          logger.info(`Stream handler ended for ${channelId}`);
-        } catch (e) {
-          logger.warn(`Stream handler end failed for ${channelId}: ${e.message}`);
-        }
+        try { channelData.streamHandler.end(); logger.info(`Stream handler ended for ${channelId}`); }
+        catch (e) { logger.warn(`Stream handler end failed for ${channelId}: ${e.message}`); }
       }
 
-      // 3) Close OpenAI WS (if not already closed).
-      if (!channelData.wsClosed) {
-        if (channelData.ws && typeof channelData.ws.close === 'function') {
-          try {
-            channelData.ws.close();
-            logger.info(`WebSocket close requested for ${channelId}`);
-          } catch (e) {
-            logger.warn(`WebSocket close failed for ${channelId}: ${e.message}`);
-          }
-        }
-        // Wait a short moment (best-effort) for ws close to propagate.
-        await new Promise(resolve => setTimeout(resolve, 300));
+      if (!channelData.wsClosed && channelData.ws && typeof channelData.ws.close === 'function') {
+        try { channelData.ws.close(); logger.info(`WebSocket close requested for ${channelId}`); }
+        catch (e) { logger.warn(`WebSocket close failed for ${channelId}: ${e.message}`); }
+        await new Promise(r => setTimeout(r, 300));
       }
 
-      // 4) Hangup ExternalMedia channel if still present.
       if (channelData.externalChannelId && ariClient) {
-        try {
-          await ariClient.channels.hangup({ channelId: channelData.externalChannelId }).catch(() => {});
-          logger.info(`External channel ${channelData.externalChannelId} hangup attempted`);
-        } catch (e) {
-          logger.warn(`External channel hangup failed for ${channelId}: ${e.message}`);
-        }
+        try { await ariClient.channels.hangup({ channelId: channelData.externalChannelId }).catch(() => {}); logger.info(`External channel ${channelData.externalChannelId} hangup attempted`); }
+        catch (e) { logger.warn(`External channel hangup failed for ${channelId}: ${e.message}`); }
       }
 
-      // 5) Destroy the bridge (removes any members left there).
       if (channelData.bridge && channelData.bridge.id && ariClient) {
-        try {
-          await ariClient.bridges.destroy({ bridgeId: channelData.bridge.id }).catch(() => {});
-          logger.info(`Bridge ${channelData.bridge.id} destroyed`);
-        } catch (e) {
-          logger.warn(`Bridge destroy failed for ${channelId}: ${e.message}`);
-        }
+        try { await ariClient.bridges.destroy({ bridgeId: channelData.bridge.id }).catch(() => {}); logger.info(`Bridge ${channelData.bridge.id} destroyed`); }
+        catch (e) { logger.warn(`Bridge destroy failed for ${channelId}: ${e.message}`); }
       }
 
-      // 6) Hangup SIP channel as a last resort.
-      if (channelData.channel && ariClient) {
-        try {
-          await ariClient.channels.hangup({ channelId });
-          logger.info(`SIP channel ${channelId} hangup attempted`);
-        } catch (e) {
-          logger.warn(`SIP channel hangup failed for ${channelId}: ${e.message}`);
-        }
+      // IMPORTANT: do not hangup SIP if we handed the call to the queue
+      if (!channelData.redirecting && channelData.channel && ariClient) {
+        try { await ariClient.channels.hangup({ channelId }); logger.info(`SIP channel ${channelId} hangup attempted`); }
+        catch (e) { logger.warn(`SIP channel hangup failed for ${channelId}: ${e.message}`); }
       }
 
-      // 7) Close RTP sockets and release the RTP port.
       try {
         const rx = rtpReceivers.get(channelId);
-        if (rx && rx.isOpen) {
-          rx.isOpen = false;
-          rx.close();
-          logger.info(`RTP receiver socket closed for ${channelId}`);
-        }
+        if (rx && rx.isOpen) { rx.isOpen = false; rx.close(); logger.info(`RTP receiver socket closed for ${channelId}`); }
         rtpReceivers.delete(channelId);
-      } catch (e) {
-        logger.warn(`RTP receiver close failed for ${channelId}: ${e.message}`);
-      }
+      } catch (e) { logger.warn(`RTP receiver close failed for ${channelId}: ${e.message}`); }
 
       try {
         const tx = rtpSenders.get(channelId);
-        if (tx && tx.isOpen) {
-          tx.isOpen = false;
-          tx.close();
-          logger.info(`RTP sender socket closed for ${channelId}`);
-        }
+        if (tx && tx.isOpen) { tx.isOpen = false; tx.close(); logger.info(`RTP sender socket closed for ${channelId}`); }
         rtpSenders.delete(channelId);
-      } catch (e) {
-        logger.warn(`RTP sender close failed for ${channelId}: ${e.message}`);
-      }
+      } catch (e) { logger.warn(`RTP sender close failed for ${channelId}: ${e.message}`); }
 
       try {
         if (typeof channelData.rtpPort === 'number') {
           releaseRtpPort(channelData.rtpPort);
           logger.info(`Released RTP port ${channelData.rtpPort} for ${channelId}`);
         }
-      } catch (e) {
-        logger.warn(`releaseRtpPort failed for ${channelId}: ${e.message}`);
-      }
+      } catch (e) { logger.warn(`releaseRtpPort failed for ${channelId}: ${e.message}`); }
 
-      // 8) Clear maps (both directions).
       try {
-        if (channelData.externalChannelId) {
-          extMap.delete(channelData.externalChannelId);
-        }
-        extMap.delete(channelId); // if you stored a reverse mapping keyed by SIP id
+        if (channelData.externalChannelId) extMap.delete(channelData.externalChannelId);
+        extMap.delete(channelId);
       } catch (_) {}
 
-      // 9) Remove the main sipMap entry last.
       sipMap.delete(channelId);
-
       logger.info(`Cleanup finished for ${channelId}`);
     } catch (e) {
       logger.error(`Cleanup error for ${channelId}: ${e.message}`);
@@ -271,6 +327,7 @@ async function cleanupChannel(channelId, reason = 'manual') {
  *   wire maps, start OpenAI WS.
  * - On ExternalMedia StasisStart: add to bridge.
  * - On channel StasisEnd/ChannelDestroyed: mark ended and schedule cleanup.
+ * - Provides a handoff-to-queue callback to the OpenAI socket layer.
  */
 async function initializeAriClient() {
   try {
@@ -279,21 +336,17 @@ async function initializeAriClient() {
     await ariClient.start(config.ARI_APP);
     logger.info(`ARI application "${config.ARI_APP}" started`);
 
-    // === Main call entry point ===
     ariClient.on('StasisStart', async (evt, channel) => {
       logger.info(`StasisStart for channel ${channel.id}, name: ${channel.name}`);
 
-      // Ignore Local/ helper legs, they are not part of this app's media graph.
       if (channel.name && channel.name.startsWith('Local/')) {
         logger.info(`Ignoring Local channel ${channel.id}, name: ${channel.name}`);
         return;
       }
 
-      // ExternalMedia leg: add to bridge when it appears.
+      // ExternalMedia leg: add it to the bridge
       if (isExternalMediaChannel(channel.name || '')) {
         logger.info(`ExternalMedia channel started: ${channel.id}`);
-
-        // Wait briefly for the map created by the SIP leg.
         let mapping = extMap.get(channel.id);
         let attempts = 0;
         const maxAttempts = 10;
@@ -315,7 +368,7 @@ async function initializeAriClient() {
         return;
       }
 
-      // SIP leg: create bridge, start RTP, create ExternalMedia, start WS.
+      // SIP leg: create bridge, start RTP, create ExternalMedia, start WS
       logger.info(`SIP channel started: ${channel.id}`);
       try {
         const bridgeId = `${channel.id}_bridge`;
@@ -327,7 +380,6 @@ async function initializeAriClient() {
         const port = getNextRtpPort();
         await startRTPReceiver(channel.id, port);
 
-        // Store initial call state in sipMap
         const callerId = (
           channel?.caller?.number ||
           channel?.caller?.name ||
@@ -346,7 +398,6 @@ async function initializeAriClient() {
           callerId
         });
 
-        // Create ExternalMedia channel and remember both directions in extMap/sipMap
         const extParams = {
           app: config.ARI_APP,
           external_host: `127.0.0.1:${port}`,
@@ -359,72 +410,64 @@ async function initializeAriClient() {
         const extChannel = await ariClient.channels.externalMedia(extParams);
         logger.info(`ExternalMedia channel ${extChannel.id} created with codec ulaw, RTP to 127.0.0.1:${port}`);
 
-        // extMap: external-id → { bridgeId, channelId }
         extMap.set(extChannel.id, { bridgeId, channelId: channel.id });
-        // Optional reverse mapping to simplify lookups
         extMap.set(channel.id, { bridgeId, externalChannelId: extChannel.id });
 
-        // Also store external id in SIP entry for easy cleanup later
         const sipData = sipMap.get(channel.id) || {};
         sipData.externalChannelId = extChannel.id;
         sipMap.set(channel.id, sipData);
 
-        // Optional call duration limit
         if (config.CALL_DURATION_LIMIT_SECONDS > 0) {
-          const channelData = sipMap.get(channel.id);
-          channelData.callTimeoutId = setTimeout(async () => {
+          const cd = sipMap.get(channel.id);
+          cd.callTimeoutId = setTimeout(async () => {
             logger.info(`Call duration limit of ${config.CALL_DURATION_LIMIT_SECONDS} seconds reached for channel ${channel.id}, hanging up`);
-            try {
-              await ariClient.channels.hangup({ channelId: channel.id });
-              logger.info(`Channel ${channel.id} hung up due to duration limit`);
-            } catch (e) {
-              logger.error(`Error hanging up channel ${channel.id} due to duration limit: ${e.message}`);
-            }
+            try { await ariClient.channels.hangup({ channelId: channel.id }); }
+            catch (e) { logger.error(`Duration-limit hangup error for ${channel.id}: ${e.message}`); }
           }, config.CALL_DURATION_LIMIT_SECONDS * 1000);
-          sipMap.set(channel.id, channelData);
+          sipMap.set(channel.id, cd);
         }
 
-        // Start the OpenAI Realtime WebSocket for this call.
-        await startOpenAIWebSocket(channel.id);
+        // Start OpenAI WS and pass a callback so it can request a handoff to the queue
+        await startOpenAIWebSocket(channel.id, {
+          onRedirectRequest: (chanId, phraseMatched) => {
+            // Defensive: only accept requests for the active SIP id
+            if (chanId !== channel.id) return;
+            redirectToQueue(chanId, phraseMatched).catch(e =>
+              logger.error(`redirectToQueue failed for ${chanId}: ${e.message}`)
+            );
+          }
+        });
       } catch (e) {
         logger.error(`Error in SIP channel ${channel.id}: ${e.message}`);
         await cleanupChannel(channel.id, 'stasisstart-error');
       }
     });
 
-    // === Lifecycle: channel leaves our app ===
+    // Legs leave Stasis → mark and maybe cleanup
     ariClient.on('StasisEnd', async (evt, channel) => {
       logger.info(`StasisEnd for channel ${channel.id}, name: ${channel.name}`);
-
-      // If this is a late ExternalMedia event post-cleanup, ignore quietly.
       if (isExternalMediaChannel(channel.name || '') && ignoreExtEvents.has(channel.id)) {
         logger.info(`ExternalMedia ${channel.id} StasisEnd after cleanup; ignoring`);
         return;
       }
-
-      // Mark and schedule cleanup rather than trying to infer "still active".
       markChannelEndedAndMaybeCleanup(channel, 'StasisEnd');
-
-      // If ExternalMedia, drop the extMap pointer now (best-effort).
       if (isExternalMediaChannel(channel.name || '')) {
         extMap.delete(channel.id);
         logger.info(`ExternalMedia channel ${channel.id} removed from extMap`);
       }
     });
 
-    // Defensive: in some edge cases ChannelDestroyed comes without StasisEnd.
+    // Defensive: sometimes ChannelDestroyed arrives without StasisEnd
     ariClient.on('ChannelDestroyed', async (evt, channel) => {
       logger.info(`ChannelDestroyed for channel ${channel.id}, name: ${channel.name}`);
-
       if (isExternalMediaChannel(channel.name || '') && ignoreExtEvents.has(channel.id)) {
         logger.info(`ExternalMedia ${channel.id} ChannelDestroyed after cleanup; ignoring`);
         return;
       }
-
       markChannelEndedAndMaybeCleanup(channel, 'ChannelDestroyed');
     });
 
-    // Optional: if a bridge is destroyed from outside, try to clean the call.
+    // If a bridge is destroyed from outside, try to clean the call state
     ariClient.on('BridgeDestroyed', (evt, bridge) => {
       const bridgeId = bridge.id;
       for (const [sipId, d] of sipMap.entries()) {
@@ -438,7 +481,7 @@ async function initializeAriClient() {
       }
     });
 
-    // Graceful shutdown (service stop/CTRL-C)
+    // Graceful shutdown
     process.on('SIGINT', async () => {
       logger.info('Received SIGINT, cleaning up...');
       const channelsToClean = [...sipMap.keys()];
@@ -448,12 +491,8 @@ async function initializeAriClient() {
       extMap.clear();
       cleanupPromises.clear();
       if (ariClient) {
-        try {
-          await ariClient.stop();
-          logger.info('ARI client stopped');
-        } catch (e) {
-          logger.error(`Error stopping ARI client: ${e.message}`);
-        }
+        try { await ariClient.stop(); logger.info('ARI client stopped'); }
+        catch (e) { logger.error(`Error stopping ARI client: ${e.message}`); }
       }
       logger.info('Cleanup completed, exiting.');
       process.exit(0);
