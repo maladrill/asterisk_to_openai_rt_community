@@ -30,8 +30,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 ```curl -fsSL -o autoinstall_asterisk_to_openai.sh https://raw.githubusercontent.com/maladrill/asterisk_to_openai_rt_community/main/autoinstall_asterisk_to_openai.sh```
 3. Make it executable and run it (but have OpnAI key prepared as it will be used during the installation)
    
-`chmod +x autoinstall_asterisk_to_openai.sh`
-`bash autoinstall_asterisk_to_openai.sh`
+`chmod +x autoinstall_asterisk_to_openai.sh && bash autoinstall_asterisk_to_openai.sh`
 
 5. Go to /opt/asterisk_to_openai_rt_community/config.conf and change what you need: 
 - SYSTEM_PROMPT - it is the instruction for the assistant
