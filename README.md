@@ -7,7 +7,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 
 ## Features
 - Real-time audio processing with Asterisk and OpenAI.
-- Console transcriptions for user and assistant speech; conversations saved as text files in the Asterisk recordings path.
+- Console transcriptions for user and assistant speech; *conversations saved as text file*s in the Asterisk recordings path (/var/spool/asterisk/monitor/YYYY/MM/DD as conversation-{callerID}-{unique.id}.txt.
 - Clean resource management (channels, bridges, WebSocket, RTP).
 - Configurable via `config.conf` (e.g., API key, prompt).
 - **Assistant-triggered Queue Handoff**: when the **assistant** says a configured phrase, the active call is transferred to a FreePBX Queue (e.g., L1 support).
@@ -38,8 +38,7 @@ curl -fsSL -o autoinstall_asterisk_to_openai.sh   https://raw.githubusercontent.
 
 3) Make it executable **and run** (have your OpenAI key ready, the script will ask for it):
 ```bash
-chmod +x autoinstall_asterisk_to_openai.sh
-bash autoinstall_asterisk_to_openai.sh
+chmod +x autoinstall_asterisk_to_openai.sh && bash autoinstall_asterisk_to_openai.sh
 ```
 
 4) Edit configuration:
