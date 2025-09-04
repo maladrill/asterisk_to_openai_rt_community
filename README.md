@@ -21,7 +21,7 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 | OS          | Debian 13                                                               |
 | Software    | FreePBX 17 (install on debian 12 and upgrade)                                                            |
 | Network     | Ports: 8088 (ARI), 12000+ (RTP) <br> - Access to `wss://api.openai.com/v1/realtime` |
-| Credentials | OpenAI API key (`OPENAI_API_KEY`) — prepare it **before** installing |
+| Credentials | OpenAI API key (`OPENAI_API_KEY`) ' prepare it **before** installing |
 
 ---
 
@@ -46,10 +46,10 @@ chmod +x autoinstall_asterisk_to_openai.sh && bash autoinstall_asterisk_to_opena
 nano /opt/asterisk_to_openai_rt_community/config.conf
 ```
 Change what you need:
-- `SYSTEM_PROMPT` — instruction for the assistant
-- `OPENAI_VOICE` — voices: `alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar`
-- `TRANSCRIPTION_LANGUAGE` — supported: `af, ar, hy, az, be, bs, bg, ca, zh, hr, cs, da, nl, en, et, fi, fr, gl, de, el, he, hi, hu, is, id, it, ja, kn, kk, ko, lv, lt, mk, ms, mr, mi, ne, no, fa, pl, pt, ro, ru, sr, sk, sl, es, sw, sv, tl, ta, th, tr, uk, ur, vi, cy`
-- `RECORDINGS_DIR` — where transcriptions are stored (default `/var/spool/asterisk/monitor`, saved as `RECORDINGS_DIR/YYYY/MM/DD/...`)
+- `SYSTEM_PROMPT` ' instruction for the assistant
+- `OPENAI_VOICE` ' voices: `alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar`
+- `TRANSCRIPTION_LANGUAGE` ' supported: `af, ar, hy, az, be, bs, bg, ca, zh, hr, cs, da, nl, en, et, fi, fr, gl, de, el, he, hi, hu, is, id, it, ja, kn, kk, ko, lv, lt, mk, ms, mr, mi, ne, no, fa, pl, pt, ro, ru, sr, sk, sl, es, sw, sv, tl, ta, th, tr, uk, ur, vi, cy`
+- `RECORDINGS_DIR` ' where transcriptions are stored (default `/var/spool/asterisk/monitor`, saved as `RECORDINGS_DIR/YYYY/MM/DD/...`)
 
 ---
 
@@ -57,14 +57,14 @@ Change what you need:
 
 ### What it does
 - **Handoff to Queue**  
-  When the **assistant** says one of the configured handoff phrases (e.g., _“Okay, connecting you to the technical department”_), the app:
+  When the **assistant** says one of the configured handoff phrases (e.g., _'Okay, connecting you to the technical department'_), the app:
   1. Stops playback/streams,
   2. Closes the OpenAI WebSocket,
   3. Tears down the ExternalMedia bridge,
   4. Continues the live SIP channel in the dialplan at `ext-queues,<REDIRECTION_QUEUE>,1`.
 
 - **Call Termination**  
-  When the **assistant** says one of the configured goodbye phrases (e.g., _“goodbye”_), the app:
+  When the **assistant** says one of the configured goodbye phrases (e.g., _'goodbye'_), the app:
   1. Cleans up timers and streams,
   2. Closes the WebSocket,
   3. Hangs up channels and frees RTP ports.
@@ -89,7 +89,7 @@ AGENT_TERMINATE_PHRASES="'goodbye','farewell'"
 > - Handoff/termination trigger only on **assistant** transcripts (not on user speech).
 > - Internal flags prevent double actions (no duplicate transfers/hangups).
 
-### What you’ll see in logs
+### What you'll see in logs
 ```text
 [INFO] Assistant redirect phrase matched ("okay, connecting you to the technical department") for <CHAN>; requesting queue handoff
 [INFO] Redirection requested for <CHAN> to queue 3000 (trigger="...")
@@ -100,15 +100,73 @@ AGENT_TERMINATE_PHRASES="'goodbye','farewell'"
 
 ---
 
+
+
+## Email notifications (transcript via SMTP)
+
+This app can email the **final call transcript** as a `.txt` attachment when the call ends.
+
+Emails are **skipped on handoff** (when the call is redirected to a FreePBX Queue), so your agents don't receive duplicates.
+
+### 1) Install dependency
+
+`nodemailer` is already listed in `package.json`. If you maintain dependencies manually, ensure it’s installed:
+```bash
+npm i nodemailer --save
+```
+
+### 2) Configure SMTP in `config.conf`
+
+Add or adjust the following keys:
+```ini
+# --- Email delivery ---
+EMAIL_ENABLED=true                 ; Enable/disable email sending
+EMAIL_HOST=smtp.yourhost.com       ; SMTP server hostname
+EMAIL_PORT=465                     ; 465 for SMTPS, 587 for STARTTLS
+EMAIL_SECURE=true                  ; true for port 465, false for 587
+EMAIL_USER=postmaster@yourhost.com ; SMTP username
+EMAIL_PASS=your-strong-password    ; SMTP password
+
+# Sender and recipients
+EMAIL_FROM="SQS Assistant" <postmaster@yourhost.com>
+EMAIL_TO=alerts@example.com, noc@example.com
+```
+
+**Notes**
+- Multiple recipients are comma-separated in `EMAIL_TO`.
+- Set `EMAIL_SECURE=true` when using port **465** (implicit TLS); use `false` for **587** with STARTTLS.
+- Make sure your SMTP account allows programmatic access and 2FA/app passwords as required.
+
+### 3) What gets sent
+- **Subject:** includes the Asterisk channel ID and caller ID (if available).
+- **Body:** short summary with the cleanup reason (e.g., `assistant-terminate:goodbye`).
+- **Attachment:** the transcript saved at `{RECORDINGS_DIR}/YYYY/MM/DD/conversation-{callerID}-{channelId}.txt`.
+
+### 4) Operational details
+- On normal call end, the app logs:
+  ```text
+  [INFO] Email sent for <CHANNEL_ID> to alice@example.com, bob@example.com; messageId=<...>
+  ```
+- If the call was **handed off** to a queue, you'll see:
+  ```text
+  [INFO] Email not sent for <CHANNEL_ID> (redirect=true, enabled=true)
+  ```
+- Errors are logged at WARN level (e.g., invalid credentials or network issues).
+
+### 5) Security tips
+- Keep `config.conf` **out of version control**.
+- Rotate SMTP passwords regularly and prefer app-specific passwords when available.
+- Use a dedicated mailbox for outbound notifications.
+
 ## FreePBX GUI: Route calls to the custom dialplan (9999)
 
-**Option A — Quick test from any internal phone**
+**Option A ' Quick test from any internal phone**
 ```text
 Dial: 9999     (context: from-internal)
 ```
 
-**Option B — Create a Custom Destination and a Misc Application**
-1) Admin → Custom Destinations → Add
+**Option B ' Create a Custom Destination and a Misc Application**
+1) Admin ' Custom Destinations ' Add
 - Custom Destination: `from-internal-custom,9999,1`  
 - Description: `OpenAI Realtime (9999)`  
 - Return: `No`  
@@ -116,16 +174,16 @@ Dial: 9999     (context: from-internal)
 
 ![Screenshot](https://github.com/maladrill/asterisk_to_openai_rt_community/blob/main/custom_destinations.png)
 
-2) Applications → Misc Applications → Add
+2) Applications ' Misc Applications ' Add
 - Description: `OpenAI Realtime`  
 - Feature Code: `*9999` (or `9999` if you prefer)  
-- Destination: `Custom Destinations → OpenAI Realtime (9999)`  
+- Destination: `Custom Destinations ' OpenAI Realtime (9999)`  
 - **Submit**, then **Apply Config**
 
-**Option C — Inbound Route → Destination**
+**Option C ' Inbound Route ' Destination**
 - To point an external DID to the app:  
-  Connectivity → Inbound Routes → (pick your DID)  
-  Set **Destination**: `Custom Destinations → OpenAI Realtime (9999)`  
+  Connectivity ' Inbound Routes ' (pick your DID)  
+  Set **Destination**: `Custom Destinations ' OpenAI Realtime (9999)`  
   **Submit**, then **Apply Config**
 
 **Notes**
@@ -158,28 +216,28 @@ sudo systemctl stop asterisk-openai.service
 ---
 
 ## Troubleshooting
-- **`OPENAI_API_KEY is missing`** — verify the key in `config.conf`.
-- **`ARI connection error`** — check Asterisk and port 8088:
+- **`OPENAI_API_KEY is missing`** ' verify the key in `config.conf`.
+- **`ARI connection error`** ' check Asterisk and port 8088:
   ```bash
   sudo systemctl status asterisk
   sudo asterisk -rx "ari show status"
   ```
-- **No transcriptions** — set `LOG_LEVEL=debug` in `config.conf`.
+- **No transcriptions** ' set `LOG_LEVEL=debug` in `config.conf`.
 - **Debugging**:
   ```bash
   tail -f /var/log/asterisk/messages
   cd /opt/asterisk_to_openai_rt_community
   node --inspect index.js
   ```
-- **No audio** — ensure `external_media_address` & `external_signaling_address` in `pjsip.conf` match your server’s public IP. Verify RTP ports (12000+) are open in firewall. Check that `asterisk.js` uses the correct `external_host`.
+- **No audio** ' ensure `external_media_address` & `external_signaling_address` in `pjsip.conf` match your server's public IP. Verify RTP ports (12000+) are open in firewall. Check that `asterisk.js` uses the correct `external_host`.
 
-- **Handoff didn’t trigger** — say a phrase that makes the **assistant** reply with one of your `REDIRECTION_PHRASES`. Check logs for:
+- **Handoff didn't trigger** ' say a phrase that makes the **assistant** reply with one of your `REDIRECTION_PHRASES`. Check logs for:
   ```
   Assistant redirect phrase matched (...) ; requesting queue handoff
   ```
   If missing: verify spelling/case in `config.conf` and that `REDIRECTION_QUEUE` points to an existing FreePBX Queue.
 
-- **Call didn’t terminate** — end with a phrase present in `AGENT_TERMINATE_PHRASES` and check for:
+- **Call didn't terminate** ' end with a phrase present in `AGENT_TERMINATE_PHRASES` and check for:
   ```
   Assistant termination phrase matched (...)
   ```
