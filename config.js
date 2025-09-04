@@ -30,9 +30,20 @@ const config = {
   SYSTEM_PROMPT: process.env.SYSTEM_PROMPT,
   INITIAL_MESSAGE: process.env.INITIAL_MESSAGE || 'Hi',
   SILENCE_PADDING_MS: parseInt(process.env.SILENCE_PADDING_MS) || 100,
-  CALL_DURATION_LIMIT_SECONDS: parseInt(process.env.CALL_DURATION_LIMIT_SECONDS) || 0 // 0 means no limit
-};
+  CALL_DURATION_LIMIT_SECONDS: parseInt(process.env.CALL_DURATION_LIMIT_SECONDS) || 0, // <— ważny przecinek
 
+  // --- Email on normal call end (not after redirect/handoff) ---
+  EMAIL_ENABLED: /^true$/i.test(process.env.EMAIL_ENABLED || ''),
+  SMTP_HOST: process.env.SMTP_HOST,
+  SMTP_PORT: Number(process.env.SMTP_PORT || 587),
+  SMTP_SECURE: /^true$/i.test(process.env.SMTP_SECURE || 'false'), // boolean
+  SMTP_USER: process.env.SMTP_USER,
+  SMTP_PASS: process.env.SMTP_PASS,
+  EMAIL_FROM: process.env.EMAIL_FROM,
+  EMAIL_TO: process.env.EMAIL_TO, // comma-separated list
+  EMAIL_SUBJECT_TEMPLATE: process.env.EMAIL_SUBJECT_TEMPLATE, // optional
+  EMAIL_BODY_TEMPLATE: process.env.EMAIL_BODY_TEMPLATE        // optional
+};
 // Debug logging of loaded configuration
 console.log('Loaded configuration:', {
   ARI_URL: config.ARI_URL,
@@ -43,7 +54,7 @@ console.log('Loaded configuration:', {
   SYSTEM_PROMPT: config.SYSTEM_PROMPT ? 'set' : 'unset'
 });
 
-// Logger configuration
+// === Logger ===
 let sentEventCounter = 0;
 let receivedEventCounter = -1;
 const logger = winston.createLogger({
@@ -68,12 +79,13 @@ const logger = winston.createLogger({
       return `${counter} | ${timestamp} [${level.toUpperCase()}] ${coloredMessage}`;
     })
   ),
-  transports: [
-    new winston.transports.Console()
-  ]
+  transports: [ new winston.transports.Console() ]
 });
 
-// Validate critical configurations
+// <-- NOW use the logger:
+logger.info(`Email config: enabled=${config.EMAIL_ENABLED}, host=${config.SMTP_HOST || 'unset'}, port=${config.SMTP_PORT}, secure=${config.SMTP_SECURE}, to=${config.EMAIL_TO || 'unset'}`);
+
+// Walidacje
 if (!config.SYSTEM_PROMPT || config.SYSTEM_PROMPT.trim() === '') {
   logger.error('SYSTEM_PROMPT is missing or empty in config.conf');
   process.exit(1);
@@ -89,9 +101,4 @@ logger.info(`CALL_DURATION_LIMIT_SECONDS set to ${config.CALL_DURATION_LIMIT_SEC
 const logClient = (msg, level = 'info') => logger[level](`[Client] ${msg}`);
 const logOpenAI = (msg, level = 'info') => logger[level](`[OpenAI] ${msg}`);
 
-module.exports = {
-  config,
-  logger,
-  logClient,
-  logOpenAI
-};
+module.exports = { config, logger, logClient, logOpenAI };
