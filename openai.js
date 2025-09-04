@@ -62,6 +62,37 @@ function appendTranscript(channelId, who, text) {
 
 logger.info('Loading openai.js module');
 
+/**
+ * Normalize/validate turn detection settings so we never send invalid values.
+ * Only 'server_vad' and 'semantic_vad' are accepted by the API.
+ */
+function normalizeTurnDetection() {
+  const rawType = String(config.VAD_TYPE || 'server_vad').toLowerCase();
+  const type = (rawType === 'server_vad' || rawType === 'semantic_vad') ? rawType : 'server_vad';
+
+  // Common numeric guards
+  const num = (v, def) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : def;
+  };
+
+  if (type === 'semantic_vad') {
+    // semantic_vad does not use threshold/padding/silence knobs
+    return { type: 'semantic_vad' };
+  }
+
+  // server_vad defaults
+  return {
+    type: 'server_vad',
+    threshold: num(config.VAD_THRESHOLD, 0.6),
+    prefix_padding_ms: num(config.VAD_PREFIX_PADDING_MS, 200),
+    silence_duration_ms: num(config.VAD_SILENCE_DURATION_MS, 600),
+  };
+}
+
+/**
+ * Wait until our RTP sender queue is flushed (or a timeout elapses).
+ */
 async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval = 10) {
   const channelData = sipMap.get(channelId);
   if (!channelData?.streamHandler) {
@@ -73,7 +104,7 @@ async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval =
 
   let audioDurationMs = 1000; // Default minimum
   if (channelData.totalDeltaBytes) {
-    audioDurationMs = Math.ceil((channelData.totalDeltaBytes / 8000) * 1000) + 500; // Audio duration + 500ms margin
+    audioDurationMs = Math.ceil((channelData.totalDeltaBytes / 8000) * 1000) + 500; // audio len + margin
   }
   const dynamicTimeout = Math.min(audioDurationMs, maxWaitTime);
   logOpenAI(`Using dynamic timeout of ${dynamicTimeout}ms for ${channelId} (estimated audio duration: ${(channelData.totalDeltaBytes || 0) / 8000}s)`, 'info');
@@ -89,20 +120,22 @@ async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval =
     });
   });
 
-  const isBufferEmpty = () => (
+  const isBufferEmpty = () =>
     (!streamHandler.audioBuffer || streamHandler.audioBuffer.length === 0) &&
-    (!streamHandler.packetQueue || streamHandler.packetQueue.length === 0)
-  );
+    (!streamHandler.packetQueue || streamHandler.packetQueue.length === 0);
 
   if (!isBufferEmpty()) {
     let lastLogTime = 0;
     while (!isBufferEmpty() && (Date.now() - startWaitTime) < maxWaitTime) {
       const now = Date.now();
       if (now - lastLogTime >= 50) {
-        logOpenAI(`Waiting for RTP buffer to empty for ${channelId} | Buffer: ${streamHandler.audioBuffer?.length || 0} bytes, Queue: ${streamHandler.packetQueue?.length || 0} packets`, 'info');
+        logOpenAI(
+          `Waiting for RTP buffer to empty for ${channelId} | Buffer: ${streamHandler.audioBuffer?.length || 0} bytes, Queue: ${streamHandler.packetQueue?.length || 0} packets`,
+          'info'
+        );
         lastLogTime = now;
       }
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      await new Promise((resolve) => setTimeout(resolve, checkInterval));
     }
     if (!isBufferEmpty()) {
       logger.warn(`Timeout waiting for RTP buffer to empty for ${channelId} after ${maxWaitTime}ms`);
@@ -151,9 +184,35 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
   let itemRoles = new Map();
   let lastUserItemId = null;
 
-  // --- NEW: graceful terminate flags ---
+  // --- graceful terminate flags / guards ---
   let terminateRequested = false;
   let terminateReason = null;
+  let terminationInFlight = false;
+  let terminationWatchdogStarted = false;
+
+  /** Idempotent finalizer that cleans up the call once playback is fully flushed. */
+  const finalizeAndTerminate = async () => {
+    if (terminationInFlight) return;
+    terminationInFlight = true;
+    try {
+      // Best-effort wait for RTP to finish.
+      await waitForBufferEmpty(channelId, 8000, 10);
+      await new Promise((r) => setTimeout(r, 250)); // short tail-silence to ensure PSTN hears the end
+    } catch (e) {
+      logger.warn(`Graceful terminate wait failed for ${channelId}: ${e.message}`);
+    } finally {
+      try {
+        if (typeof onTerminateRequest === 'function') {
+          onTerminateRequest(channelId, terminateReason || 'agent-terminate');
+        }
+      } catch (e) {
+        logger.warn(`onTerminateRequest failed for ${channelId}: ${e.message}`);
+      } finally {
+        terminateRequested = false;
+        terminateReason = null;
+      }
+    }
+  };
 
   const processMessage = async (response) => {
     try {
@@ -184,18 +243,22 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
 
         case 'response.created':
           logOpenAI(`Response created for ${channelId}`);
+          isResponseActive = true;
           break;
 
         case 'response.audio.delta':
           if (response.delta) {
             const deltaBuffer = Buffer.from(response.delta, 'base64');
-            if (deltaBuffer.length > 0 && !deltaBuffer.every(byte => byte === 0x7F)) {
+            if (deltaBuffer.length > 0 && !deltaBuffer.every((byte) => byte === 0x7f)) {
               totalDeltaBytes += deltaBuffer.length;
               channelData.totalDeltaBytes = totalDeltaBytes; // Store in channelData
               sipMap.set(channelId, channelData);
               segmentCount++;
               if (totalDeltaBytes - loggedDeltaBytes >= 40000 || segmentCount >= 100) {
-                logOpenAI(`Received audio delta for ${channelId}: ${deltaBuffer.length} bytes, total: ${totalDeltaBytes} bytes, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`, 'info');
+                logOpenAI(
+                  `Received audio delta for ${channelId}: ${deltaBuffer.length} bytes, total: ${totalDeltaBytes} bytes, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`,
+                  'info'
+                );
                 loggedDeltaBytes = totalDeltaBytes;
                 segmentCount = 0;
               }
@@ -204,7 +267,7 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
               if (totalDeltaBytes === deltaBuffer.length) {
                 const silenceDurationMs = config.SILENCE_PADDING_MS || 100;
                 const silencePackets = Math.ceil(silenceDurationMs / 20);
-                const silenceBuffer = Buffer.alloc(silencePackets * 160, 0x7F);
+                const silenceBuffer = Buffer.alloc(silencePackets * 160, 0x7f);
                 packetBuffer = Buffer.concat([silenceBuffer, deltaBuffer]);
                 logger.info(`Prepended ${silencePackets} silence packets (${silenceDurationMs} ms) for ${channelId}`);
               }
@@ -232,23 +295,40 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
 
             // Save assistant text to transcript
             appendTranscript(channelId, 'ASSISTANT', response.transcript);
-
+            // NEW: also log assistant transcript at INFO level so it's visible with LOG_LEVEL=info
+            // (Use logOpenAI wrapper to keep the same [OpenAI] prefix/format)
+            logOpenAI(`Assistant transcription for ${channelId}: ${response.transcript}`, 'info');
             // --- TERMINATE: mark only; do NOT cleanup yet
             if (Array.isArray(config.AGENT_TERMINATE_PHRASES) && config.AGENT_TERMINATE_PHRASES.length) {
-              const matched = config.AGENT_TERMINATE_PHRASES.find(p => txt.includes(p));
+              const matched = config.AGENT_TERMINATE_PHRASES.find((p) => txt.includes(p));
               if (matched) {
                 terminateRequested = true;
                 terminateReason = matched;
-                logger.info(`Assistant termination phrase matched ("${matched}") for ${channelId}; will terminate after playback completes`);
+                logger.info(
+                  `Assistant termination phrase matched ("${matched}") for ${channelId}; will terminate after playback completes`
+                );
+
+                // Start a one-shot watchdog in case 'response.audio.done' never arrives.
+                if (!terminationWatchdogStarted) {
+                  terminationWatchdogStarted = true;
+                  setTimeout(() => {
+                    if (terminateRequested && !terminationInFlight) {
+                      logger.warn(`Termination watchdog firing for ${channelId} — proceeding to finalize`);
+                      finalizeAndTerminate();
+                    }
+                  }, Number(config.TERMINATION_WATCHDOG_MS || 8000)).unref();
+                }
               }
             }
 
             // --- REDIRECT: assistant offers human/queue handoff
             if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.length) {
-              const matched = config.REDIRECTION_PHRASES.find(p => txt.includes(p));
+              const matched = config.REDIRECTION_PHRASES.find((p) => txt.includes(p));
               if (matched && typeof onRedirectRequest === 'function') {
-                logger.info(`Assistant redirect phrase matched ("${matched}") for ${channelId}; requesting queue handoff`);
-                // UWAGA: nie ustawiamy tutaj żadnych flag w sipMap!
+                logger.info(
+                  `Assistant redirect phrase matched ("${matched}") for ${channelId}; requesting queue handoff`
+                );
+                // Do not set any flags in sipMap here; let asterisk.js own the redirect state.
                 onRedirectRequest(channelId, matched);
               }
             }
@@ -272,7 +352,10 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
           break;
 
         case 'response.audio.done':
-          logOpenAI(`Response audio done for ${channelId}, total delta bytes: ${totalDeltaBytes}, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`, 'info');
+          logOpenAI(
+            `Response audio done for ${channelId}, total delta bytes: ${totalDeltaBytes}, estimated duration: ${(totalDeltaBytes / 8000).toFixed(2)}s`,
+            'info'
+          );
           isResponseActive = false;
           loggedDeltaBytes = 0;
           segmentCount = 0;
@@ -280,25 +363,20 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
           lastUserItemId = null;
           responseBuffer = Buffer.alloc(0);
 
-          // --- NEW: graceful hangup after full playback if requested
-          if (terminateRequested && typeof onTerminateRequest === 'function') {
-            try {
-              await waitForBufferEmpty(channelId, 8000, 10); // wait for RTP queue + audioFinished
-              await new Promise(r => setTimeout(r, 250));     // tail silence to ensure PSTN hears the end
-              onTerminateRequest(channelId, terminateReason);
-            } catch (e) {
-              logger.warn(`Graceful terminate wait failed for ${channelId}: ${e.message}. Proceeding with cleanup.`);
-              onTerminateRequest(channelId, terminateReason);
-            } finally {
-              terminateRequested = false;
-              terminateReason = null;
-            }
+          // If assistant asked to terminate, finalize now (defensive against WS errors)
+          if (terminateRequested) {
+            await finalizeAndTerminate();
           }
           break;
 
         case 'error':
-          logger.error(`OpenAI error for ${channelId}: ${response.error.message}`);
-          ws.close();
+          // Log API error but ensure termination still proceeds if it was requested.
+          logger.error(`OpenAI error for ${channelId}: ${response.error?.message || 'unknown error'}`);
+          try { ws && ws.close(); } catch (_) {}
+          if (terminateRequested) {
+            // WS error must not prevent us from hanging up the call.
+            finalizeAndTerminate();
+          }
           break;
 
         default:
@@ -314,33 +392,34 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
     return new Promise((resolve, reject) => {
       ws = new WebSocket(config.REALTIME_URL, {
         headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'OpenAI-Beta': 'realtime=v1'
-        }
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          'OpenAI-Beta': 'realtime=v1',
+        },
       });
 
       ws.on('open', async () => {
         logClient(`OpenAI WebSocket connected for ${channelId}`);
-        ws.send(JSON.stringify({
-          type: 'session.update',
-          session: {
-            modalities: ['audio', 'text'],
-            voice: config.OPENAI_VOICE || 'alloy',
-            instructions: config.SYSTEM_PROMPT,
-            input_audio_format: 'g711_ulaw',
-            output_audio_format: 'g711_ulaw',
-            input_audio_transcription: {
-              model: config.TRANSCRIPTION_MODEL || 'whisper-1',
-              language: config.TRANSCRIPTION_LANGUAGE || 'en'
+
+        // Build a safe turn_detection payload
+        const turn_detection = normalizeTurnDetection();
+
+        ws.send(
+          JSON.stringify({
+            type: 'session.update',
+            session: {
+              modalities: ['audio', 'text'],
+              voice: config.OPENAI_VOICE || 'alloy',
+              instructions: config.SYSTEM_PROMPT,
+              input_audio_format: 'g711_ulaw',
+              output_audio_format: 'g711_ulaw',
+              input_audio_transcription: {
+                model: config.TRANSCRIPTION_MODEL || 'whisper-1',
+                language: config.TRANSCRIPTION_LANGUAGE || 'en',
+              },
+              turn_detection,
             },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: config.VAD_THRESHOLD || 0.6,
-              prefix_padding_ms: config.VAD_PREFIX_PADDING_MS || 200,
-              silence_duration_ms: config.VAD_SILENCE_DURATION_MS || 600
-            }
-          }
-        }));
+          })
+        );
         logClient(`Session updated for ${channelId}`);
 
         try {
@@ -353,23 +432,27 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
 
           const itemId = uuid().replace(/-/g, '').substring(0, 32);
           logClient(`Sending initial message for ${channelId}: ${config.INITIAL_MESSAGE || 'Hi'}`);
-          ws.send(JSON.stringify({
-            type: 'conversation.item.create',
-            item: {
-              id: itemId,
-              type: 'message',
-              role: 'user',
-              content: [{ type: 'input_text', text: config.INITIAL_MESSAGE || 'Hi' }]
-            }
-          }));
-          ws.send(JSON.stringify({
-            type: 'response.create',
-            response: {
-              modalities: ['audio', 'text'],
-              instructions: config.SYSTEM_PROMPT,
-              output_audio_format: 'g711_ulaw'
-            }
-          }));
+          ws.send(
+            JSON.stringify({
+              type: 'conversation.item.create',
+              item: {
+                id: itemId,
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: config.INITIAL_MESSAGE || 'Hi' }],
+              },
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'response.create',
+              response: {
+                modalities: ['audio', 'text'],
+                instructions: config.SYSTEM_PROMPT,
+                output_audio_format: 'g711_ulaw',
+              },
+            })
+          );
           logClient(`Requested response for ${channelId}`);
           isResponseActive = true;
           resolve(ws);
@@ -391,6 +474,11 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
 
       ws.on('error', (e) => {
         logger.error(`WebSocket error for ${channelId}: ${e.message}`);
+        // If termination was requested, ensure we still end the call
+        if (terminateRequested) {
+          finalizeAndTerminate();
+          return;
+        }
         if (retryCount < maxRetries && sipMap.has(channelId)) {
           retryCount++;
           setTimeout(() => connectWebSocket().then(resolve).catch(reject), 1000);
@@ -405,6 +493,12 @@ async function startOpenAIWebSocket(channelId, hooks = {}) {
         channelData.ws = null;
         sipMap.set(channelId, channelData);
         ws.off('close', handleClose);
+
+        // If we were supposed to terminate, do it even if WS closed abruptly.
+        if (terminateRequested) {
+          finalizeAndTerminate();
+        }
+
         const cleanupResolve = cleanupPromises.get(`ws_${channelId}`);
         if (cleanupResolve) {
           cleanupResolve();
