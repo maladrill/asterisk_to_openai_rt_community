@@ -126,17 +126,20 @@ EOF
 
 ensure_ari_general_custom() {
   local f="/etc/asterisk/ari_general_custom.conf"
-  touch "$f"
-  if ! grep -q '^\[general\]' "$f" 2>/dev/null; then
-    cat >> "$f" <<EOF
-[general]
-enabled = yes
-pretty  = yes
-EOF
+  touch "$f"; safe_backup "$f"
+
+  # Usuń ewentualne błędne nagłówki [general]
+  sed -i -e '/^[[:space:]]*\[general\][[:space:]]*$/d' "$f"
+
+  # Upewnij się, że zaczynamy od nowej linii (unikamy sklejania z poprzednim include)
+  if [ -s "$f" ]; then
+    tail -c1 "$f" | od -An -t x1 | grep -q '0a' || echo >> "$f"
   else
-    grep -q '^[[:space:]]*enabled[[:space:]]*=' "$f" || echo "enabled = yes" >> "$f"
-    grep -q '^[[:space:]]*pretty[[:space:]]*='  "$f" || echo "pretty  = yes" >> "$f"
+    : > "$f"
   fi
+
+  grep -q '^[[:space:]]*enabled[[:space:]]*=' "$f" || echo "enabled = yes"  >> "$f"
+  grep -q '^[[:space:]]*pretty[[:space:]]*='  "$f" || echo "pretty  = yes" >> "$f"
 }
 
 ensure_ari_user_custom() {
