@@ -427,7 +427,7 @@ async function initializeAriClient() {
           sipMap.set(channel.id, cd);
         }
 
-        // Start OpenAI WS and pass a callback so it can request a handoff to the queue
+        // Start OpenAI WS and pass callbacks so it can request a handoff or termination
         await startOpenAIWebSocket(channel.id, {
           onRedirectRequest: (chanId, phraseMatched) => {
             // Defensive: only accept requests for the active SIP id
@@ -435,6 +435,11 @@ async function initializeAriClient() {
             redirectToQueue(chanId, phraseMatched).catch(e =>
               logger.error(`redirectToQueue failed for ${chanId}: ${e.message}`)
             );
+          },
+          onTerminateRequest: async (chanId, phraseMatched) => {
+            if (chanId !== channel.id) return;
+            logger.info(`Assistant termination phrase matched ("${phraseMatched}") for ${chanId}; cleaning up call`);
+            await cleanupChannel(chanId, `assistant-terminate:${phraseMatched}`);
           }
         });
       } catch (e) {
