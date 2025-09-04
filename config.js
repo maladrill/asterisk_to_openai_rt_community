@@ -9,11 +9,18 @@ const config = {
   ARI_PASS: process.env.ARI_PASSWORD,
   ARI_APP: 'asterisk_to_openai_rt',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  REALTIME_URL: `wss://api.openai.com/v1/realtime?model=${process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2025-06-03'}`,
+  REALTIME_URL: `wss://api.openai.com/v1/realtime?model=${process.env.REALTIME_MODEL || 'gpt-4o-mini-realtime-preview-2024-12-17'}`,
   OPENAI_VOICE: process.env.OPENAI_VOICE,
   RECORDINGS_DIR: process.env.RECORDINGS_DIR || '/var/spool/asterisk/monitor',
   TRANSCRIPTION_MODEL: process.env.TRANSCRIPTION_MODEL || 'whisper-1',
   TRANSCRIPTION_LANGUAGE: process.env.TRANSCRIPTION_LANGUAGE || 'en',
+  REDIRECTION_QUEUE: process.env.REDIRECTION_QUEUE,
+  REDIRECTION_PHRASES: (process.env.REDIRECTION_PHRASES
+    ? Array.from(process.env.REDIRECTION_PHRASES.matchAll(/'([^']+)'/g)).map(m => m[1].toLowerCase().normalize('NFKC').trim())
+    : []),
+  AGENT_TERMINATE_PHRASES: (process.env.AGENT_TERMINATE_PHRASES
+    ? Array.from(process.env.AGENT_TERMINATE_PHRASES.matchAll(/'([^']+)'/g)).map(m => m[1].toLowerCase().normalize('NFKC').trim())
+    : []),
   RTP_PORT_START: 12000,
   MAX_CONCURRENT_CALLS: parseInt(process.env.MAX_CONCURRENT_CALLS) || 10,
   VAD_THRESHOLD: parseFloat(process.env.VAD_THRESHOLD) || 0.6,
