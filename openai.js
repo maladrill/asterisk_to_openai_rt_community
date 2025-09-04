@@ -115,7 +115,8 @@ async function waitForBufferEmpty(channelId, maxWaitTime = 6000, checkInterval =
   return true;
 }
 
-async function startOpenAIWebSocket(channelId) {
+async function startOpenAIWebSocket(channelId, hooks = {}) {
+  const { onRedirectRequest, onTerminateRequest } = hooks;
   const OPENAI_API_KEY = config.OPENAI_API_KEY;
   if (!OPENAI_API_KEY) {
     logger.error('OPENAI_API_KEY is missing in config');
@@ -205,17 +206,39 @@ async function startOpenAIWebSocket(channelId) {
           }
           break;
         case 'response.audio_transcript.done':
-          if (response.transcript) {
-            const role = response.item_id && itemRoles.get(response.item_id) ? itemRoles.get(response.item_id) : (lastUserItemId ? 'User' : 'Assistant');
-            logger.debug(`Transcript done - Full message: ${JSON.stringify(response, null, 2)}`);
-            if (role === 'User') {
-              logOpenAI(`User command transcription for ${channelId}: ${response.transcript}`, 'info');
-              appendTranscript(channelId, 'USER', response.transcript);
-            } else {
-              logOpenAI(`Assistant transcription for ${channelId}: ${response.transcript}`, 'info');
-              appendTranscript(channelId, 'ASSISTANT', response.transcript);
-            }
-          }
+if (response.transcript) {
+  // We ALWAYS treat this part as an ASSISTANT transcript
+  logger.debug(`Transcript done - Full message: ${JSON.stringify(response, null, 2)}`);
+  const txt = (response.transcript || '').toLowerCase().normalize('NFKC');
+
+  // Save to the file
+  appendTranscript(channelId, 'ASSISTANT', response.transcript);
+
+  // --- TERMINATE: terminate phrase
+  if (Array.isArray(config.AGENT_TERMINATE_PHRASES) && config.AGENT_TERMINATE_PHRASES.length) {
+    const matched = config.AGENT_TERMINATE_PHRASES.find(p => txt.includes(p));
+    if (matched && typeof onTerminateRequest === 'function') {
+      const cd = sipMap.get(channelId) || {};
+      if (!cd.terminating) {
+        cd.terminating = true;
+        sipMap.set(channelId, cd);
+        logger.info(`Assistant termination phrase matched ("${matched}") for ${channelId}`);
+        onTerminateRequest(channelId, matched);
+      }
+    }
+  }
+
+// --- REDIRECT: assistant offers human/queue handoff
+if (Array.isArray(config.REDIRECTION_PHRASES) && config.REDIRECTION_PHRASES.length) {
+  const txt = (response.transcript || '').toLowerCase().normalize('NFKC');
+  const matched = config.REDIRECTION_PHRASES.find(p => txt.includes(p));
+  if (matched && typeof onRedirectRequest === 'function') {
+    logger.info(`Assistant redirect phrase matched ("${matched}") for ${channelId}; requesting queue handoff`);
+    // UWAGA: nie ustawiamy tutaj żadnych flag w sipMap!
+    onRedirectRequest(channelId, matched);
+  }
+}
+        }
           break;
         case 'conversation.item.input_audio_transcription.delta':
           if (response.delta) {
