@@ -628,4 +628,4 @@ async function initializeAriClient() {
   }
 }
 
-module.exports = { initializeAriClient, ariClient };
+module.exports = { initializeAriClient, ariClient }
