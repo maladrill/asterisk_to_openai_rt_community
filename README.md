@@ -29,10 +29,11 @@ Welcome! This Node.js application integrates FreePBX 17 (Debian) with the OpenAI
 2. Download the script from the repo
 ```curl -fsSL -o autoinstall_asterisk_to_openai.sh https://raw.githubusercontent.com/maladrill/asterisk_to_openai_rt_community/main/autoinstall_asterisk_to_openai.sh```
 3. Make it executable and run it (but have OpnAI key prepared as it will be used during the installation)
-```chmod +x autoinstall_asterisk_to_openai.sh```
-```./autoinstall_asterisk_to_openai.sh``` 
+   
+`chmod +x autoinstall_asterisk_to_openai.sh`
+`bash autoinstall_asterisk_to_openai.sh`
 
-4. Go to /opt/asterisk_to_openai_rt_community/config.conf and change what you need: 
+5. Go to /opt/asterisk_to_openai_rt_community/config.conf and change what you need: 
 - SYSTEM_PROMPT - it is the instruction for the assistant
 - OPENAI_VOICE - voices you can use are: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', and 'cedar'.
 - TRANSCRIPTION_LANGUAGE - supported langages: af=Afrikaans, ar=Arabic, hy=Armenian, az=Azerbaijani, be=Belarusian, bs=Bosnian, bg=Bulgarian, ca=Catalan, zh=Chinese, hr=Croatian, cs=Czech, da=Danish, nl=Dutch, en=English, et=Estonian, fi=Finnish, fr=French, gl=Galician, de=German, el=Greek, he=Hebrew, hi=Hindi, hu=Hungarian, is=Icelandic, id=Indonesian, it=Italian, ja=Japanese, kn=Kannada, kk=Kazakh, ko=Korean, lv=Latvian, lt=Lithuanian, mk=Macedonian, ms=Malay, mr=Marathi, mi=Maori, ne=Nepali, no=Norwegian, fa=Persian, pl=Polish, pt=Portuguese, ro=Romanian, ru=Russian, sr=Serbian, sk=Slovak, sl=Slovenian, es=Spanish, sw=Swahili, sv=Swedish, tl=Tagalog, ta=Tamil, th=Thai, tr=Turkish, uk=Ukrainian, ur=Urdu, vi=Vietnamese, cy=Welsh
