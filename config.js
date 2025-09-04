@@ -9,7 +9,7 @@ const config = {
   ARI_PASS: process.env.ARI_PASSWORD,
   ARI_APP: 'asterisk_to_openai_rt',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  REALTIME_URL: `wss://api.openai.com/v1/realtime?model=${process.env.REALTIME_MODEL || 'gpt-4o-mini-realtime-preview-2024-12-17'}`,
+  REALTIME_URL: `wss://api.openai.com/v1/realtime?model=${process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2025-06-03'}`,
   OPENAI_VOICE: process.env.OPENAI_VOICE,
   RECORDINGS_DIR: process.env.RECORDINGS_DIR || '/var/spool/asterisk/monitor',
   TRANSCRIPTION_MODEL: process.env.TRANSCRIPTION_MODEL || 'whisper-1',
